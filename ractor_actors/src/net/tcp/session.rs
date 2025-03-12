@@ -7,40 +7,11 @@
 
 // TODO: RUSTLS + Tokio : https://github.com/tokio-rs/tls/blob/master/tokio-rustls/examples/server/src/main.rs
 
+use super::stream::{NetworkStream, ReaderHalf, WriterHalf};
 use ractor::{Actor, ActorProcessingErr, ActorRef, DerivedActorRef, SpawnErr};
 use ractor::{ActorCell, SupervisionEvent};
 use std::net::SocketAddr;
 use tokio::io::ErrorKind;
-use tokio::io::{AsyncReadExt, ReadHalf, WriteHalf};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::TcpStream;
-
-/// Helper method to read exactly `len` bytes from the stream into a pre-allocated buffer
-/// of bytes
-async fn read_n_bytes(stream: &mut ActorReadHalf, len: usize) -> Result<Vec<u8>, tokio::io::Error> {
-    let mut buf = vec![0u8; len];
-    let mut c_len = 0;
-    if let ActorReadHalf::Regular(r) = stream {
-        r.readable().await?;
-    }
-
-    while c_len < len {
-        let n = match stream {
-            ActorReadHalf::ServerTls(t) => t.read(&mut buf[c_len..]).await?,
-            ActorReadHalf::ClientTls(t) => t.read(&mut buf[c_len..]).await?,
-            ActorReadHalf::Regular(t) => t.read(&mut buf[c_len..]).await?,
-        };
-        if n == 0 {
-            // EOF
-            return Err(tokio::io::Error::new(
-                tokio::io::ErrorKind::UnexpectedEof,
-                "EOF",
-            ));
-        }
-        c_len += n;
-    }
-    Ok(buf)
-}
 
 // =========================== Session actor =========================== //
 
@@ -80,7 +51,7 @@ impl TryFrom<SessionMessage> for SendFrame {
 impl Session {
     pub async fn spawn_linked(
         handler: DerivedActorRef<FrameAvailable>,
-        stream: super::NetworkStream,
+        stream: NetworkStream,
         supervisor: ActorCell,
     ) -> Result<ActorRef<SessionMessage>, SpawnErr> {
         match Actor::spawn_linked(
@@ -93,7 +64,7 @@ impl Session {
             stream,
             supervisor,
         )
-            .await
+        .await
         {
             Err(err) => {
                 tracing::error!("Failed to spawn session writer actor: {err}");
@@ -125,34 +96,15 @@ pub struct SessionState {
 #[cfg_attr(feature = "async-trait", ractor::async_trait)]
 impl Actor for Session {
     type Msg = SessionMessage;
-    type Arguments = super::NetworkStream;
+    type Arguments = NetworkStream;
     type State = SessionState;
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        stream: super::NetworkStream,
+        stream: NetworkStream,
     ) -> Result<Self::State, ActorProcessingErr> {
-        let (read, write) = match stream {
-            super::NetworkStream::Raw { stream, .. } => {
-                let (read, write) = stream.into_split();
-                (ActorReadHalf::Regular(read), ActorWriteHalf::Regular(write))
-            }
-            super::NetworkStream::TlsClient { stream, .. } => {
-                let (read_half, write_half) = tokio::io::split(stream);
-                (
-                    ActorReadHalf::ClientTls(read_half),
-                    ActorWriteHalf::ClientTls(write_half),
-                )
-            }
-            super::NetworkStream::TlsServer { stream, .. } => {
-                let (read_half, write_half) = tokio::io::split(stream);
-                (
-                    ActorReadHalf::ServerTls(read_half),
-                    ActorWriteHalf::ServerTls(write_half),
-                )
-            }
-        };
+        let (read, write) = stream.into_split();
 
         // let (read, write) = stream.into_split();
         // spawn writer + reader child actors
@@ -173,10 +125,7 @@ impl Actor for Session {
         )
         .await?;
 
-        Ok(Self::State {
-            writer,
-            reader,
-        })
+        Ok(Self::State { writer, reader })
     }
 
     async fn post_stop(
@@ -256,61 +205,10 @@ impl Actor for Session {
 
 // =========================== Session writer =========================== //
 
-enum ActorWriteHalf {
-    ServerTls(WriteHalf<tokio_rustls::server::TlsStream<TcpStream>>),
-    ClientTls(WriteHalf<tokio_rustls::client::TlsStream<TcpStream>>),
-    Regular(OwnedWriteHalf),
-}
-
-impl ActorWriteHalf {
-    async fn write_u64(&mut self, n: u64) -> tokio::io::Result<()> {
-        use tokio::io::AsyncWriteExt;
-        match self {
-            Self::ServerTls(t) => t.write_u64(n).await,
-            Self::ClientTls(t) => t.write_u64(n).await,
-            Self::Regular(t) => t.write_u64(n).await,
-        }
-    }
-
-    async fn write_all(&mut self, data: &[u8]) -> tokio::io::Result<()> {
-        use tokio::io::AsyncWriteExt;
-        match self {
-            Self::ServerTls(t) => t.write_all(data).await,
-            Self::ClientTls(t) => t.write_all(data).await,
-            Self::Regular(t) => t.write_all(data).await,
-        }
-    }
-
-    async fn flush(&mut self) -> tokio::io::Result<()> {
-        use tokio::io::AsyncWriteExt;
-        match self {
-            Self::ServerTls(t) => t.flush().await,
-            Self::ClientTls(t) => t.flush().await,
-            Self::Regular(t) => t.flush().await,
-        }
-    }
-}
-
-enum ActorReadHalf {
-    ServerTls(ReadHalf<tokio_rustls::server::TlsStream<TcpStream>>),
-    ClientTls(ReadHalf<tokio_rustls::client::TlsStream<TcpStream>>),
-    Regular(OwnedReadHalf),
-}
-
-impl ActorReadHalf {
-    async fn read_u64(&mut self) -> tokio::io::Result<u64> {
-        match self {
-            Self::ServerTls(t) => t.read_u64().await,
-            Self::ClientTls(t) => t.read_u64().await,
-            Self::Regular(t) => t.read_u64().await,
-        }
-    }
-}
-
 struct SessionWriter;
 
 struct SessionWriterState {
-    writer: Option<ActorWriteHalf>,
+    writer: Option<WriterHalf>,
 }
 
 enum SessionWriterMessage {
@@ -321,13 +219,13 @@ enum SessionWriterMessage {
 #[cfg_attr(feature = "async-trait", ractor::async_trait)]
 impl Actor for SessionWriter {
     type Msg = SessionWriterMessage;
-    type Arguments = ActorWriteHalf;
+    type Arguments = WriterHalf;
     type State = SessionWriterState;
 
     async fn pre_start(
         &self,
         _myself: ActorRef<Self::Msg>,
-        writer: ActorWriteHalf,
+        writer: WriterHalf,
     ) -> Result<Self::State, ActorProcessingErr> {
         // OK we've established connection, now we can process requests
 
@@ -355,7 +253,7 @@ impl Actor for SessionWriter {
         match message {
             SessionWriterMessage::WriteFrame(msg) if state.writer.is_some() => {
                 if let Some(stream) = &mut state.writer {
-                    if let ActorWriteHalf::Regular(w) = stream {
+                    if let WriterHalf::Regular(w) = stream {
                         w.writable().await?;
                     }
 
@@ -398,19 +296,19 @@ pub enum SessionReaderMessage {
 }
 
 struct SessionReaderState {
-    reader: Option<ActorReadHalf>,
+    reader: Option<ReaderHalf>,
 }
 
 #[cfg_attr(feature = "async-trait", ractor::async_trait)]
 impl Actor for SessionReader {
     type Msg = SessionReaderMessage;
-    type Arguments = ActorReadHalf;
+    type Arguments = ReaderHalf;
     type State = SessionReaderState;
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        reader: ActorReadHalf,
+        reader: ReaderHalf,
     ) -> Result<Self::State, ActorProcessingErr> {
         // start waiting for the first frame on the network
         let _ = myself.cast(SessionReaderMessage::WaitForFrame);
@@ -461,7 +359,7 @@ impl Actor for SessionReader {
             }
             Self::Msg::ReadFrame(length) if state.reader.is_some() => {
                 if let Some(stream) = &mut state.reader {
-                    match read_n_bytes(stream, length as usize).await {
+                    match stream.read_n_bytes(length as usize).await {
                         Ok(buf) => {
                             tracing::trace!("Payload of length({}) received", buf.len());
                             // NOTE: Our implementation writes 2 messages when sending something over the wire, the first

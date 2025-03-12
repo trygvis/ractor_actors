@@ -5,13 +5,12 @@
 
 //! TCP Server to accept incoming sessions
 
+use super::stream::{IncomingEncryptionMode, NetworkPort, NetworkStream};
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-
-use super::{IncomingEncryptionMode, NetworkStream};
 
 /// A Tcp Socket [Listener] responsible for creating the socket and accepting new connections. When
 /// a client connects, the `on_connection` will be called. The callback should create a new
@@ -20,7 +19,7 @@ use super::{IncomingEncryptionMode, NetworkStream};
 /// The [Listener] supervises all the TCP [super::session::Session] actors and is responsible for
 /// logging connects and disconnects.
 pub struct Listener {
-    port: super::NetworkPort,
+    port: NetworkPort,
     encryption: IncomingEncryptionMode,
 
     connection_handler: Arc<
@@ -35,7 +34,7 @@ pub struct Listener {
 impl Listener {
     /// Create a new `Listener`
     pub fn new<F, Fut>(
-        port: super::NetworkPort,
+        port: NetworkPort,
         encryption: IncomingEncryptionMode,
         connection_handler: F,
     ) -> Self
@@ -111,14 +110,14 @@ impl Actor for Listener {
                     let local = stream.local_addr()?;
 
                     let network_stream = match &self.encryption {
-                        IncomingEncryptionMode::Raw => Some(super::NetworkStream::Raw {
+                        IncomingEncryptionMode::Raw => Some(NetworkStream::Raw {
                             peer_addr: addr,
                             local_addr: local,
                             stream,
                         }),
                         IncomingEncryptionMode::Tls(acceptor) => {
                             match acceptor.accept(stream).await {
-                                Ok(enc_stream) => Some(super::NetworkStream::TlsServer {
+                                Ok(enc_stream) => Some(NetworkStream::TlsServer {
                                     peer_addr: addr,
                                     local_addr: local,
                                     stream: enc_stream,

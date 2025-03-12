@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use ractor::{Actor, ActorProcessingErr, ActorRef, DerivedActorRef};
 use ractor_actors::net::tcp::listener::*;
 use ractor_actors::net::tcp::session::*;
-use ractor_actors::net::tcp::*;
+use ractor_actors::net::tcp::stream::*;
 use ractor_actors::watchdog;
 use ractor_actors::watchdog::TimeoutStrategy;
 use std::error::Error;
