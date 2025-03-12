@@ -7,10 +7,9 @@
 
 // TODO: RUSTLS + Tokio : https://github.com/tokio-rs/tls/blob/master/tokio-rustls/examples/server/src/main.rs
 
-use super::stream::{NetworkStream, ReaderHalf, WriterHalf};
+use super::stream::{NetworkStream, NetworkStreamInfo, ReaderHalf, WriterHalf};
 use ractor::{Actor, ActorProcessingErr, ActorRef, DerivedActorRef, SpawnErr};
 use ractor::{ActorCell, SupervisionEvent};
-use std::net::SocketAddr;
 use tokio::io::ErrorKind;
 
 // =========================== Session actor =========================== //
@@ -21,8 +20,7 @@ use tokio::io::ErrorKind;
 /// either the reader or writer exit, they will terminate the entire session.
 pub struct Session {
     handler: DerivedActorRef<FrameAvailable>,
-    pub peer_addr: SocketAddr,
-    pub local_addr: SocketAddr,
+    pub info: NetworkStreamInfo,
 }
 
 /// A frame of data
@@ -58,8 +56,7 @@ impl Session {
             Some(stream.peer_addr().to_string()),
             Session {
                 handler,
-                peer_addr: stream.peer_addr(),
-                local_addr: stream.local_addr(),
+                info: stream.info(),
             },
             stream,
             supervisor,
@@ -133,7 +130,7 @@ impl Actor for Session {
         _myself: ActorRef<Self::Msg>,
         _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        tracing::info!("TCP Session closed for {}", self.peer_addr);
+        tracing::info!("TCP Session closed for {}", self.info.peer_addr);
         Ok(())
     }
 
