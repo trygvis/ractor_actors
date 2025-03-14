@@ -25,7 +25,7 @@ use std::sync::Arc;
 /// either the reader or writer exit, they will terminate the entire session.
 pub struct Session<AState: State, A>
 where
-    A: Actor<Msg =FrameReaderMessage, State = AState, Arguments = ReaderHalf>,
+    A: Actor<Msg = FrameReaderMessage, State = AState, Arguments = ReaderHalf>,
 {
     handler: DerivedActorRef<FrameAvailable>,
     reader_factory: Arc<
@@ -64,7 +64,7 @@ impl TryFrom<SessionMessage> for SendFrame {
 impl<AState, A> Session<AState, A>
 where
     AState: State,
-    A: Actor<Msg =FrameReaderMessage, State = AState, Arguments = ReaderHalf>,
+    A: Actor<Msg = FrameReaderMessage, State = AState, Arguments = ReaderHalf>,
 {
     pub async fn spawn_linked(
         handler: DerivedActorRef<FrameAvailable>,
@@ -73,13 +73,9 @@ where
         reader_factory: Box<
             dyn Fn(
                     ActorRef<SessionMessage>,
-                ) -> Pin<
-                    Box<
-                        dyn Future<
-                                Output = Result<A, ActorProcessingErr>,
-                            > + Send,
-                    >,
-                > + Send
+                )
+                    -> Pin<Box<dyn Future<Output = Result<A, ActorProcessingErr>> + Send>>
+                + Send
                 + Sync,
         >,
     ) -> Result<ActorRef<SessionMessage>, SpawnErr> {
@@ -126,7 +122,7 @@ pub struct SessionState {
 impl<AState, A> Actor for Session<AState, A>
 where
     AState: State,
-    A: Actor<Msg =FrameReaderMessage, State = AState, Arguments = ReaderHalf>,
+    A: Actor<Msg = FrameReaderMessage, State = AState, Arguments = ReaderHalf>,
 {
     type Msg = SessionMessage;
     type State = SessionState;
