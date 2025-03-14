@@ -5,6 +5,7 @@
 
 //! TCP server and session actors which [Frame] messages
 
+pub mod frame_reader;
 pub mod listener;
 pub mod session;
 pub mod stream;

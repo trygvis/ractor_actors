@@ -7,6 +7,7 @@ extern crate ractor_actors;
 
 use chrono::{DateTime, Utc};
 use ractor::{Actor, ActorProcessingErr, ActorRef, DerivedActorRef};
+use ractor_actors::net::tcp::frame_reader::FrameReader;
 use ractor_actors::net::tcp::listener::*;
 use ractor_actors::net::tcp::session::*;
 use ractor_actors::net::tcp::stream::*;
@@ -98,9 +99,14 @@ impl Actor for MySession {
     ) -> Result<Self::State, ActorProcessingErr> {
         tracing::info!("New session: {}", stream.peer_addr());
 
-        let session = Session::spawn_linked(myself.get_derived(), stream, myself.get_cell())
-            .await
-            .map_err(ActorProcessingErr::from)?;
+        let session = Session::spawn_linked(
+            myself.get_derived(),
+            stream,
+            myself.get_cell(),
+            Box::new(|session| Box::pin(async { Ok(FrameReader { session }) })),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
 
         if WATCHDOG.load(Ordering::SeqCst) {
             watchdog::register(

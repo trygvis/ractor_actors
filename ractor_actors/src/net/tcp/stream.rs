@@ -121,11 +121,7 @@ impl ReaderHalf {
         }
 
         while c_len < len {
-            let n = match self {
-                Self::ServerTls(t) => t.read(&mut buf[c_len..]).await?,
-                Self::ClientTls(t) => t.read(&mut buf[c_len..]).await?,
-                Self::Regular(t) => t.read(&mut buf[c_len..]).await?,
-            };
+            let n = self.read(buf.as_mut_slice()).await?;
             if n == 0 {
                 // EOF
                 return Err(tokio::io::Error::new(
@@ -143,6 +139,14 @@ impl ReaderHalf {
             Self::ServerTls(t) => t.read_u64().await,
             Self::ClientTls(t) => t.read_u64().await,
             Self::Regular(t) => t.read_u64().await,
+        }
+    }
+
+   pub async fn read<'a>(&'a mut self, buf: &'a mut [u8]) -> tokio::io::Result<usize> {
+        match self {
+            Self::ServerTls(t) => t.read(buf).await,
+            Self::ClientTls(t) => t.read(buf).await,
+            Self::Regular(t) => t.read(buf).await,
         }
     }
 }
