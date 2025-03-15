@@ -54,16 +54,22 @@ impl Actor for SeparatorReader {
                     Ok(length) => {
                         tracing::trace!("Read {} bytes", length);
 
-                        match buf.iter().position(|b| *b == self.separator) {
+                        match buf[..length].iter().position(|b| *b == self.separator) {
                             Some(index) => {
                                 let (left, right) = buf.split_at(index);
                                 state.buffers.push(left.into());
+
+                                // Drop the separator
+                                let right = &right[1..];
 
                                 // Get the full buffer's array and create a new, empty one.
                                 let vec = vec![right.into()];
                                 let buffers = mem::replace(&mut state.buffers, vec);
 
-                                let _ = self.session.cast(BytesAvailable(buffers));
+                                let byte_len: usize = buffers.iter().map(|b| b.len()).sum();
+                                tracing::trace!("Sending {} bytes", byte_len);
+                                let r = self.session.cast(BytesAvailable(buffers));
+                                tracing::trace!("Sending {:?} bytes", r);
                             }
                             None => {
                                 let mut bs = BytesMut::with_capacity(length);
