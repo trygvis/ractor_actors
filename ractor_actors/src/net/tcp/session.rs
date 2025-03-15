@@ -158,7 +158,7 @@ where
         // let (read, write) = stream.into_split();
         // spawn writer + reader child actors
         let (writer, _) = Actor::spawn_linked(
-            Some(format!("{}-rw", myself.get_name().unwrap_or_default())),
+            Some(format!("{}-wr", myself.get_name().unwrap_or_default())),
             SessionWriter,
             write,
             myself.get_cell(),
