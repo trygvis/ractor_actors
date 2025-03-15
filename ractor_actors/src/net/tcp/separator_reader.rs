@@ -13,18 +13,14 @@ pub struct SeparatorReader {
     pub separator: u8,
 }
 
-pub enum SeparatorReaderMessage {
-    Reading,
-}
-
 pub struct SeparatorReaderState {
-    reader: Option<ReaderHalf>,
+    reader: ReaderHalf,
     buffers: Vec<BytesMut>,
 }
 
 #[cfg_attr(feature = "async-trait", ractor::async_trait)]
 impl Actor for SeparatorReader {
-    type Msg = SeparatorReaderMessage;
+    type Msg = ();
     type State = SeparatorReaderState;
     type Arguments = ReaderHalf;
 
@@ -33,9 +29,9 @@ impl Actor for SeparatorReader {
         myself: ActorRef<Self::Msg>,
         reader: ReaderHalf,
     ) -> Result<Self::State, ActorProcessingErr> {
-        let _ = myself.cast(Self::Msg::Reading);
+        let _ = myself.cast(());
         Ok(Self::State {
-            reader: Some(reader),
+            reader,
             buffers: Vec::new(),
         })
     }
@@ -43,63 +39,58 @@ impl Actor for SeparatorReader {
     async fn handle(
         &self,
         myself: ActorRef<Self::Msg>,
-        message: Self::Msg,
+        _message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        match (message, &mut state.reader) {
-            (Self::Msg::Reading, Some(reader)) => {
-                let mut buf = [0; BUFFER_SIZE];
+        let mut buf = [0; BUFFER_SIZE];
 
-                match reader.read(&mut buf).await {
-                    Ok(length) => {
-                        tracing::trace!("Read {} bytes", length);
+        match state.reader.read(&mut buf).await {
+            Ok(0) => {
+                tracing::trace!("EOF");
+                myself.stop(Some("channel_closed".to_string()));
+            }
+            Err(err) if err.kind() == ErrorKind::UnexpectedEof => {
+                tracing::trace!("EOF");
+                myself.stop(Some("channel_closed".to_string()));
+            }
+            Err(_other_err) => {
+                tracing::trace!("Error ({_other_err:?}) on stream");
+                myself.stop(Some("channel_error".to_string()));
+            }
+            Ok(length) => {
+                tracing::trace!("Read {} bytes", length);
 
-                        match buf[..length].iter().position(|b| *b == self.separator) {
-                            Some(index) => {
-                                let (left, right) = buf.split_at(index);
-                                state.buffers.push(left.into());
+                match buf[..length].iter().position(|b| *b == self.separator) {
+                    Some(index) => {
+                        let (left, right) = buf.split_at(index);
+                        state.buffers.push(left.into());
 
-                                // Drop the separator
-                                let right = &right[1..];
+                        // Drop the separator
+                        let right = &right[1..];
 
-                                // Get the full buffer's array and create a new, empty one.
-                                let vec = vec![right.into()];
-                                let buffers = mem::replace(&mut state.buffers, vec);
+                        // Get the full buffer's array and create a new, empty one.
+                        let vec = vec![right.into()];
+                        let buffers = mem::replace(&mut state.buffers, vec);
 
-                                let byte_len: usize = buffers.iter().map(|b| b.len()).sum();
-                                tracing::trace!("Sending {} bytes", byte_len);
-                                let r = self.session.cast(BytesAvailable(buffers));
-                                tracing::trace!("Sending {:?} bytes", r);
-                            }
-                            None => {
-                                let mut bs = BytesMut::with_capacity(length);
-                                bs.put_slice(&buf[..length]); // Zero-copy slice management
-
-                                state.buffers.push(bs);
-                            }
-                        }
-
-                        let _ = myself.cast(SeparatorReaderMessage::Reading);
-                        return Ok(());
+                        let byte_len: usize = buffers.iter().map(|b| b.len()).sum();
+                        tracing::trace!("Sending {} bytes", byte_len);
+                        let r = self.session.cast(BytesAvailable(buffers));
+                        tracing::trace!("Sending {:?} bytes", r);
                     }
-                    Err(err) if err.kind() == ErrorKind::UnexpectedEof => {
-                        tracing::trace!("Error (EOF) on stream");
-                        // EOF, close the stream by dropping the stream
-                        drop(state.reader.take());
-                        myself.stop(Some("channel_closed".to_string()));
-                    }
-                    Err(_other_err) => {
-                        tracing::trace!("Error ({_other_err:?}) on stream");
-                        // some other TCP error, more handling necessary
+                    None => {
+                        let mut bs = BytesMut::with_capacity(length);
+                        bs.put_slice(&buf[..length]); // Zero-copy slice management
+
+                        state.buffers.push(bs);
                     }
                 }
-            }
-            _ => {
-                // no stream is available, keep looping until one is available
+
+                let _ = myself.cast(());
+                return Ok(());
             }
         }
 
-        let _ = myself.cast(SeparatorReaderMessage::Reading);
+        let _ = myself.cast(());
 
         Ok(())
     }
