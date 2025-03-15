@@ -7,5 +7,6 @@
 
 pub mod frame_reader;
 pub mod listener;
+pub mod separator_reader;
 pub mod session;
 pub mod stream;

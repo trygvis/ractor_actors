@@ -14,9 +14,11 @@ use ractor_actors::net::tcp::stream::*;
 use ractor_actors::watchdog;
 use ractor_actors::watchdog::TimeoutStrategy;
 use std::error::Error;
+use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
+use bytes::BytesMut;
 
 /// Controls if the watchdog is used
 static WATCHDOG: AtomicBool = AtomicBool::new(false);
@@ -66,16 +68,16 @@ struct MySession {
 }
 
 enum MySessionMsg {
-    FrameAvailable(Frame),
+    FrameAvailable(Vec<BytesMut>),
 }
 
-impl From<FrameAvailable> for MySessionMsg {
-    fn from(FrameAvailable(frame): FrameAvailable) -> Self {
-        Self::FrameAvailable(frame)
+impl From<BytesAvailable> for MySessionMsg {
+    fn from(BytesAvailable(bytes): BytesAvailable) -> Self {
+        Self::FrameAvailable(bytes)
     }
 }
 
-impl TryFrom<MySessionMsg> for FrameAvailable {
+impl TryFrom<MySessionMsg> for BytesAvailable {
     type Error = ();
 
     fn try_from(_: MySessionMsg) -> Result<Self, Self::Error> {
@@ -139,18 +141,18 @@ impl Actor for MySession {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            Self::Msg::FrameAvailable(frame) => {
+            Self::Msg::FrameAvailable(bytes) => {
                 if WATCHDOG.load(Ordering::SeqCst) {
                     watchdog::ping(myself.get_id()).await?;
                 }
 
-                let s: String = String::from_utf8(frame).unwrap();
+                let s: String = String::from_utf8(bytes.iter().flatten().cloned().collect()).unwrap();
                 tracing::info!("Got message: {:?}", s);
 
                 let ts: DateTime<Utc> = SystemTime::now().into();
                 let reply = format!("{}: {}", ts.to_rfc3339(), s);
 
-                let _ = state.session.cast(SendFrame(reply.into_bytes()))?;
+                let _ = state.session.cast(SendFrame(reply.into_bytes().deref().into()))?;
 
                 Ok(())
             }

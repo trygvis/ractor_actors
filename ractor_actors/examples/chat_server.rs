@@ -1,3 +1,4 @@
+use bytes::BytesMut;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use ractor_actors::net::tcp::listener::*;
 use ractor_actors::net::tcp::separator_reader::*;
@@ -58,23 +59,23 @@ impl Actor for ChatServer {
 
 struct ChatSession {}
 enum ChatSessionMsg {
-    FrameAvailable(Frame),
+    ReadLine(Vec<BytesMut>),
 }
 
-impl From<FrameAvailable> for ChatSessionMsg {
-    fn from(FrameAvailable(frame): FrameAvailable) -> Self {
-        Self::FrameAvailable(frame)
+impl From<BytesAvailable> for ChatSessionMsg {
+    fn from(BytesAvailable(frame): BytesAvailable) -> Self {
+        Self::ReadLine(frame)
     }
 }
 
-impl TryFrom<ChatSessionMsg> for FrameAvailable {
+impl TryFrom<ChatSessionMsg> for BytesAvailable {
     type Error = ();
 
     fn try_from(msg: ChatSessionMsg) -> Result<Self, Self::Error> {
-        if let ChatSessionMsg::FrameAvailable(frame) = msg {
-            Ok(FrameAvailable(frame))
-        } else {
-            Err(())
+        match msg {
+            ChatSessionMsg::ReadLine(frame) => {
+                Ok(BytesAvailable(frame))
+            }
         }
     }
 }
@@ -90,8 +91,8 @@ impl Actor for ChatSession {
         myself: ActorRef<Self::Msg>,
         stream: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        let session = Session::spawn_linked(
-            myself.get_derived().map_err(ActorProcessingErr::from)?,
+        let _session = Session::spawn_linked(
+            myself.get_derived(),
             stream,
             myself.get_cell(),
             Box::new(|session| {

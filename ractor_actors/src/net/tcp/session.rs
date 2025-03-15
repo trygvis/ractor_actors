@@ -7,8 +7,8 @@
 
 // TODO: RUSTLS + Tokio : https://github.com/tokio-rs/tls/blob/master/tokio-rustls/examples/server/src/main.rs
 
-use super::frame_reader::FrameReaderMessage;
 use super::stream::{NetworkStream, NetworkStreamInfo, ReaderHalf, WriterHalf};
+use bytes::BytesMut;
 use ractor::{
     Actor, ActorCell, ActorProcessingErr, ActorRef, DerivedActorRef, SpawnErr, State,
     SupervisionEvent,
@@ -19,30 +19,27 @@ use std::sync::Arc;
 
 // =========================== Session actor =========================== //
 
+pub struct BytesAvailable(pub Vec<BytesMut>);
+pub struct SendFrame(pub BytesMut);
+
 /// Represents a bidirectional tcp connection along with send + receive operations
 ///
 /// The [Session] actor supervises two child actors, [FrameReader] and [SessionWriter]. Should
 /// either the reader or writer exit, they will terminate the entire session.
-pub struct Session<AState: State, A>
+pub struct Session<AState: State, AMsg, A>
 where
-    A: Actor<Msg = FrameReaderMessage, State = AState, Arguments = ReaderHalf>,
+    A: Actor<Msg = AMsg, State = AState, Arguments = ReaderHalf>,
 {
-    handler: DerivedActorRef<FrameAvailable>,
+    handler: DerivedActorRef<BytesAvailable>,
     reader_factory: Arc<
         dyn Fn(
-                ActorRef<SessionMessage>,
+                DerivedActorRef<BytesAvailable>,
             ) -> Pin<Box<dyn Future<Output = Result<A, ActorProcessingErr>> + Send>>
             + Send
             + Sync,
     >,
     pub info: NetworkStreamInfo,
 }
-
-/// A frame of data
-pub type Frame = Vec<u8>;
-
-pub struct FrameAvailable(pub Frame);
-pub struct SendFrame(pub Frame);
 
 impl From<SendFrame> for SessionMessage {
     fn from(SendFrame(frame): SendFrame) -> Self {
@@ -61,22 +58,41 @@ impl TryFrom<SessionMessage> for SendFrame {
     }
 }
 
-impl<AState, A> Session<AState, A>
+impl From<BytesAvailable> for SessionMessage {
+    fn from(BytesAvailable(chunks): BytesAvailable) -> Self {
+        SessionMessage::FrameAvailable(chunks)
+    }
+}
+
+impl TryFrom<SessionMessage> for BytesAvailable {
+    type Error = ();
+
+    fn try_from(value: SessionMessage) -> Result<Self, Self::Error> {
+        match value {
+            SessionMessage::FrameAvailable(chunks) => Ok(BytesAvailable(chunks)),
+            _ => Err(()),
+        }
+    }
+}
+
+impl<AState, AMsg, A> Session<AState, AMsg, A>
 where
     AState: State,
-    A: Actor<Msg = FrameReaderMessage, State = AState, Arguments = ReaderHalf>,
+    AMsg: 'static,
+    A: Actor<Msg = AMsg, State = AState, Arguments = ReaderHalf>,
 {
     pub async fn spawn_linked(
-        handler: DerivedActorRef<FrameAvailable>,
+        handler: DerivedActorRef<BytesAvailable>,
         stream: NetworkStream,
         supervisor: ActorCell,
         reader_factory: Box<
             dyn Fn(
-                    ActorRef<SessionMessage>,
+                    DerivedActorRef<BytesAvailable>,
                 )
                     -> Pin<Box<dyn Future<Output = Result<A, ActorProcessingErr>> + Send>>
                 + Send
-                + Sync,
+                + Sync
+                + 'static,
         >,
     ) -> Result<ActorRef<SessionMessage>, SpawnErr> {
         match Actor::spawn_linked(
@@ -106,23 +122,23 @@ where
 /// The connection messages
 pub enum SessionMessage {
     /// Send a message over the channel
-    Send(Frame),
+    Send(BytesMut),
 
     /// A frame was received on the channel
-    FrameAvailable(Frame),
+    FrameAvailable(Vec<BytesMut>),
 }
 
 /// The session's state
 pub struct SessionState {
     writer: ActorRef<SessionWriterMessage>,
-    reader: ActorRef<FrameReaderMessage>,
+    reader: ActorCell,
 }
 
 #[cfg_attr(feature = "async-trait", ractor::async_trait)]
-impl<AState, A> Actor for Session<AState, A>
+impl<AState, AMsg: 'static, A> Actor for Session<AState, AMsg, A>
 where
     AState: State,
-    A: Actor<Msg = FrameReaderMessage, State = AState, Arguments = ReaderHalf>,
+    A: Actor<Msg = AMsg, State = AState, Arguments = ReaderHalf>,
 {
     type Msg = SessionMessage;
     type State = SessionState;
@@ -144,7 +160,7 @@ where
             myself.get_cell(),
         )
         .await?;
-        let handler = (self.reader_factory)(myself.clone()).await?;
+        let handler = (self.reader_factory)(myself.clone().get_derived()).await?;
 
         let (reader, _) = Actor::spawn(
             Some(format!("{}-rd", myself.get_name().unwrap_or_default())),
@@ -155,7 +171,10 @@ where
 
         reader.link(myself.get_cell());
 
-        Ok(Self::State { writer, reader })
+        Ok(Self::State {
+            writer,
+            reader: reader.get_cell(),
+        })
     }
 
     async fn post_stop(
@@ -188,7 +207,7 @@ where
                 //     self.local_addr,
                 //     self.peer_addr,
                 // );
-                let _ = self.handler.cast(FrameAvailable(msg));
+                let _ = self.handler.cast(BytesAvailable(msg));
             }
         }
         Ok(())
@@ -243,7 +262,7 @@ struct SessionWriterState {
 
 enum SessionWriterMessage {
     /// Write a frame over the wire
-    WriteFrame(Frame),
+    WriteFrame(BytesMut),
 }
 
 #[cfg_attr(feature = "async-trait", ractor::async_trait)]

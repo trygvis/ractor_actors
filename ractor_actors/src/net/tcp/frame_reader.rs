@@ -1,10 +1,10 @@
-use super::session::SessionMessage;
+use super::session::BytesAvailable;
 use super::stream::ReaderHalf;
-use ractor::{Actor, ActorProcessingErr, ActorRef};
+use ractor::{Actor, ActorProcessingErr, ActorRef, DerivedActorRef};
 use std::io::ErrorKind;
 
 pub struct FrameReader {
-    pub session: ActorRef<SessionMessage>,
+    pub session: DerivedActorRef<BytesAvailable>,
 }
 
 /// The session connection messages
@@ -88,7 +88,9 @@ impl Actor for FrameReader {
                             // is exactly 8 bytes which constitute the length of the payload message (u64 in big endian format),
                             // followed by the payload. This tells our TCP reader how much data to read off the wire
 
-                            let _ = self.session.cast(SessionMessage::FrameAvailable(buf));
+                            let _ = self
+                                .session
+                                .cast(BytesAvailable(vec![buf.as_slice().into()]));
                         }
                         Err(err) if err.kind() == ErrorKind::UnexpectedEof => {
                             // EOF, close the stream by dropping the stream
