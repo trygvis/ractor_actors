@@ -1,7 +1,7 @@
 use bytes::BytesMut;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
+use ractor_actors::net::tcp::line_reader::*;
 use ractor_actors::net::tcp::listener::*;
-use ractor_actors::net::tcp::separator_reader::*;
 use ractor_actors::net::tcp::session::*;
 use ractor_actors::net::tcp::stream::*;
 use std::error::Error;
@@ -73,13 +73,45 @@ impl TryFrom<ChatSessionMsg> for BytesAvailable {
 
     fn try_from(msg: ChatSessionMsg) -> Result<Self, Self::Error> {
         match msg {
-            ChatSessionMsg::ReadLine(frame) => {
-                Ok(BytesAvailable(frame))
-            }
+            ChatSessionMsg::ReadLine(frame) => Ok(BytesAvailable(frame)),
         }
     }
 }
-struct ChatSessionState {}
+struct ChatSessionState {
+    session: ActorRef<SessionMessage>,
+    nick: Option<String>,
+}
+
+#[allow(dead_code)]
+impl ChatSessionState {
+    fn send_str(&mut self, string: &str) -> Result<(), ActorProcessingErr> {
+        self.session
+            .cast(SessionMessage::Send(string.into()))
+            .map_err(ActorProcessingErr::from)
+    }
+
+    fn send_str_nl(&mut self, string: &str) -> Result<(), ActorProcessingErr> {
+        self.send_str(string)?;
+        self.send_nl()
+    }
+
+    fn send_line(&mut self, string: &String) -> Result<(), ActorProcessingErr> {
+        self.session
+            .cast(SessionMessage::Send(string.as_bytes().into()))
+            .map_err(ActorProcessingErr::from)
+    }
+
+    fn send_line_nl(&mut self, string: &String) -> Result<(), ActorProcessingErr> {
+        self.send_line(string)?;
+        self.send_nl()
+    }
+
+    fn send_nl(&mut self) -> Result<(), ActorProcessingErr> {
+        self.session
+            .cast(SessionMessage::Send("\r\n".into()))
+            .map_err(ActorProcessingErr::from)
+    }
+}
 
 impl Actor for ChatSession {
     type Msg = ChatSessionMsg;
@@ -91,32 +123,50 @@ impl Actor for ChatSession {
         myself: ActorRef<Self::Msg>,
         stream: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        let _session = Session::spawn_linked(
+        let session = Session::spawn_linked(
             myself.get_derived(),
             stream,
             myself.get_cell(),
-            Box::new(|session| {
-                Box::pin(async {
-                    Ok(SeparatorReader {
-                        session,
-                        separator: '\n' as u8,
-                    })
-                })
-            }),
+            Box::new(|session| Box::pin(async { Ok(LineReader { session }) })),
         )
         .await
         .map_err(ActorProcessingErr::from)?;
 
-        Ok(ChatSessionState {})
+        let mut state = ChatSessionState {
+            session,
+            nick: None,
+        };
+
+        state.send_str("Enter your nick: ")?;
+
+        Ok(state)
     }
 
     async fn handle(
         &self,
         _myself: ActorRef<Self::Msg>,
-        _message: Self::Msg,
-        _state: &mut Self::State,
+        message: Self::Msg,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        Ok(())
+        match message {
+            ChatSessionMsg::ReadLine(frame) => {
+                // It would be nice to create the string directly from the frame.
+                let bs: Vec<u8> = frame.iter().flat_map(|b| b.iter()).copied().collect();
+                let line = String::from_utf8(bs)?;
+
+                match &state.nick {
+                    None => {
+                        state.send_line_nl(&format!("Welcome {}!", &line))?;
+                        state.nick = Some(line);
+                        Ok(())
+                    }
+                    Some(_) => {
+                        state.send_line_nl(&format!("You said {}", line))?;
+                        Ok(())
+                    }
+                }
+            }
+        }
     }
 }
 

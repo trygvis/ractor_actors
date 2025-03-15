@@ -130,6 +130,7 @@ pub enum SessionMessage {
 
 /// The session's state
 pub struct SessionState {
+    #[allow(dead_code)]
     info: NetworkStreamInfo,
     writer: ActorRef<SessionWriterMessage>,
     reader: ActorCell,
@@ -272,8 +273,8 @@ enum SessionWriterMessage {
 #[cfg_attr(feature = "async-trait", ractor::async_trait)]
 impl Actor for SessionWriter {
     type Msg = SessionWriterMessage;
-    type Arguments = WriterHalf;
     type State = SessionWriterState;
+    type Arguments = WriterHalf;
 
     async fn pre_start(
         &self,
