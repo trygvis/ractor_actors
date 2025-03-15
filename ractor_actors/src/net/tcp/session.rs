@@ -130,6 +130,7 @@ pub enum SessionMessage {
 
 /// The session's state
 pub struct SessionState {
+    info: NetworkStreamInfo,
     writer: ActorRef<SessionWriterMessage>,
     reader: ActorCell,
 }
@@ -149,6 +150,8 @@ where
         myself: ActorRef<Self::Msg>,
         stream: NetworkStream,
     ) -> Result<Self::State, ActorProcessingErr> {
+        let info = stream.info();
+
         let (read, write) = stream.into_split();
 
         // let (read, write) = stream.into_split();
@@ -172,6 +175,7 @@ where
         reader.link(myself.get_cell());
 
         Ok(Self::State {
+            info,
             writer,
             reader: reader.get_cell(),
         })
@@ -196,16 +200,16 @@ where
             Self::Msg::Send(msg) => {
                 // tracing::debug!(
                 //     "SEND: {} -> {} - '{msg:?}'",
-                //     self.local_addr,
-                //     self.peer_addr
+                //     state.info.local_addr,
+                //     state.info.peer_addr
                 // );
                 let _ = state.writer.cast(SessionWriterMessage::WriteFrame(msg));
             }
             Self::Msg::FrameAvailable(msg) => {
                 // tracing::debug!(
                 //     "RECEIVE {} <- {} - '{msg:?}'",
-                //     self.local_addr,
-                //     self.peer_addr,
+                //     state.info.local_addr,
+                //     state.info.peer_addr,
                 // );
                 let _ = self.handler.cast(BytesAvailable(msg));
             }
