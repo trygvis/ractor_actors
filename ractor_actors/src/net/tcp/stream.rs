@@ -1,5 +1,7 @@
 use std::net::SocketAddr;
-use tokio::io::{AsyncReadExt, ReadHalf, WriteHalf};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf, ReadHalf, WriteHalf};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 
@@ -52,6 +54,20 @@ pub enum NetworkStream {
 pub struct NetworkStreamInfo {
     pub peer_addr: SocketAddr,
     pub local_addr: SocketAddr,
+}
+
+impl AsyncRead for NetworkStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            NetworkStream::Raw { stream, .. } => Pin::new(stream).poll_read(cx, buf),
+            NetworkStream::TlsServer { stream, .. } => Pin::new(stream).poll_read(cx, buf),
+            NetworkStream::TlsClient { stream, .. } => Pin::new(stream).poll_read(cx, buf),
+        }
+    }
 }
 
 impl NetworkStream {
@@ -142,7 +158,7 @@ impl ReaderHalf {
         }
     }
 
-   pub async fn read<'a>(&'a mut self, buf: &'a mut [u8]) -> tokio::io::Result<usize> {
+    pub async fn read<'a>(&'a mut self, buf: &'a mut [u8]) -> tokio::io::Result<usize> {
         match self {
             Self::ServerTls(t) => t.read(buf).await,
             Self::ClientTls(t) => t.read(buf).await,
