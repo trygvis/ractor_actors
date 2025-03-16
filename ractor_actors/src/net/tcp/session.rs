@@ -166,14 +166,13 @@ where
         .await?;
         let handler = (self.reader_factory)(myself.clone().get_derived()).await?;
 
-        let (reader, _) = Actor::spawn(
+        let (reader, _) = Actor::spawn_linked(
             Some(format!("{}-rd", myself.get_name().unwrap_or_default())),
             handler,
             read,
+            myself.get_cell(),
         )
         .await?;
-
-        reader.link(myself.get_cell());
 
         Ok(Self::State {
             info,
@@ -235,7 +234,10 @@ where
                 } else {
                     tracing::error!("TCP Session received a child panic from an unknown child actor ({}) - '{panic_msg}'", actor.get_id());
                 }
-                myself.stop_children(Some("session_stop_panic".to_string()));
+
+                myself
+                    .stop_children_and_wait(Some("session_stop_panic".to_string()), None)
+                    .await;
                 myself.stop(Some("child_panic".to_string()));
             }
             SupervisionEvent::ActorTerminated(actor, _, exit_reason) => {
@@ -246,8 +248,11 @@ where
                 } else {
                     tracing::warn!("TCP Session received a child exit from an unknown child actor ({}) - '{exit_reason:?}'", actor.get_id());
                 }
-                myself.stop_children(Some("session_stop_terminated".to_string()));
-                myself.stop(Some("child_terminate".to_string()));
+
+                myself
+                    .stop_children_and_wait(Some("session_stop_panic".to_string()), None)
+                    .await;
+                myself.stop(Some("child_panic".to_string()));
             }
             _ => {
                 // all ok
