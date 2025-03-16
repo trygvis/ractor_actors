@@ -46,3 +46,7 @@ tracing-test = "0.2"
 [[example]]
 name = "tcp_client"
 required-features = ["tokio/io-std", "watchdog"]
+
+[[example]]
+name = "chat_server"
+required-features = ["tokio/io-std", "watchdog", "ractor/monitors"]

@@ -1,50 +1,136 @@
 use bytes::BytesMut;
-use ractor::{Actor, ActorProcessingErr, ActorRef};
+use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef, SupervisionEvent};
 use ractor_actors::net::tcp::line_reader::*;
 use ractor_actors::net::tcp::listener::*;
 use ractor_actors::net::tcp::session::*;
 use ractor_actors::net::tcp::stream::*;
+use std::collections::HashMap;
 use std::error::Error;
 use std::str::FromStr;
 
-struct ChatServer {}
-enum ChatServerMsg {}
+type Nick = String;
 
-struct ChatServerState {}
+struct ChatServer {}
+
+enum ChatServerMsg {
+    Join(Nick, ActorRef<ChatSessionMsg>),
+    Msg(Nick, String),
+}
+
+struct ChatServerState {
+    users: HashMap<ActorCell, User>,
+}
+
+impl ChatServerState {
+    pub(crate) fn broadcast(&self, msg: ChatSessionMsg) {
+        self.users.values().for_each(|user| {
+            let _ = user.actor.cast(msg.clone());
+        });
+    }
+}
+
+struct User {
+    nick: String,
+    actor: ActorRef<ChatSessionMsg>,
+}
 
 impl Actor for ChatServer {
     type Msg = ChatServerMsg;
     type State = ChatServerState;
-    type Arguments = NetworkPort;
+    type Arguments = ();
+
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        _args: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(Self::State {
+            users: HashMap::new(),
+        })
+    }
+
+    async fn handle(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        match message {
+            ChatServerMsg::Join(nick, actor) => {
+                myself.monitor(actor.get_cell());
+
+                state.broadcast(ChatSessionMsg::Join(nick.clone()));
+
+                state.users.insert(actor.get_cell(), User { nick, actor });
+
+                Ok(())
+            }
+            ChatServerMsg::Msg(nick, msg) => {
+                state.broadcast(ChatSessionMsg::Msg(nick, msg));
+
+                Ok(())
+            }
+        }
+    }
+
+    async fn handle_supervisor_evt(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        message: SupervisionEvent,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        match message {
+            SupervisionEvent::ActorTerminated(actor, _, _)
+            | SupervisionEvent::ActorFailed(actor, _) => {
+                if let Some(user) = state.users.remove(&actor) {
+                    state.broadcast(ChatSessionMsg::Part(user.nick.clone()));
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+struct ChatListener {}
+enum ChatListenerMsg {}
+
+struct ChatListenerState {}
+
+impl Actor for ChatListener {
+    type Msg = ChatListenerMsg;
+    type State = ChatListenerState;
+    type Arguments = (ActorRef<ChatServerMsg>, NetworkPort);
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        port: Self::Arguments,
+        (server, port): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         let _ = myself
             .spawn_linked(
                 Some(format!("listener-{}", port)),
-                Listener::new(
-                    port,
-                    IncomingEncryptionMode::Raw,
-                    move |stream| async move {
+                Listener::new(port, IncomingEncryptionMode::Raw, move |stream| {
+                    let value = server.clone();
+                    async move {
                         tracing::info!("New connection: {}", stream.peer_addr());
                         Actor::spawn(
-                            Some(format!("MySession-{}", stream.peer_addr().port())),
-                            ChatSession {},
+                            Some(format!("ChatSession-{}", stream.peer_addr().port())),
+                            ChatSession {
+                                server: value.clone(),
+                            },
                             stream,
                         )
                         .await
                         .map_err(|e| ActorProcessingErr::from(e))?;
                         Ok(())
-                    },
-                ),
+                    }
+                }),
                 (),
             )
             .await?;
 
-        Ok(ChatServerState {})
+        Ok(Self::State {})
     }
 
     async fn handle(
@@ -57,9 +143,16 @@ impl Actor for ChatServer {
     }
 }
 
-struct ChatSession {}
+struct ChatSession {
+    server: ActorRef<ChatServerMsg>,
+}
+
+#[derive(Clone)]
 enum ChatSessionMsg {
     ReadLine(Vec<BytesMut>),
+    Join(String),
+    Part(String),
+    Msg(Nick, String),
 }
 
 impl From<BytesAvailable> for ChatSessionMsg {
@@ -74,6 +167,7 @@ impl TryFrom<ChatSessionMsg> for BytesAvailable {
     fn try_from(msg: ChatSessionMsg) -> Result<Self, Self::Error> {
         match msg {
             ChatSessionMsg::ReadLine(frame) => Ok(BytesAvailable(frame)),
+            _ => Err(()),
         }
     }
 }
@@ -95,13 +189,13 @@ impl ChatSessionState {
         self.send_nl()
     }
 
-    fn send_line(&mut self, string: &String) -> Result<(), ActorProcessingErr> {
+    fn send_line(&mut self, string: String) -> Result<(), ActorProcessingErr> {
         self.session
             .cast(SessionMessage::Send(string.as_bytes().into()))
             .map_err(ActorProcessingErr::from)
     }
 
-    fn send_line_nl(&mut self, string: &String) -> Result<(), ActorProcessingErr> {
+    fn send_line_nl(&mut self, string: String) -> Result<(), ActorProcessingErr> {
         self.send_line(string)?;
         self.send_nl()
     }
@@ -144,7 +238,7 @@ impl Actor for ChatSession {
 
     async fn handle(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
@@ -154,17 +248,33 @@ impl Actor for ChatSession {
                 let bs: Vec<u8> = frame.iter().flat_map(|b| b.iter()).copied().collect();
                 let line = String::from_utf8(bs)?;
 
-                match &state.nick {
+                match state.nick.clone() {
                     None => {
-                        state.send_line_nl(&format!("Welcome {}!", &line))?;
+                        state.send_line_nl(format!("Welcome {}!", &line))?;
+                        self.server
+                            .cast(ChatServerMsg::Join(line.clone(), myself))?;
                         state.nick = Some(line);
                         Ok(())
                     }
-                    Some(_) => {
-                        state.send_line_nl(&format!("You said {}", line))?;
+                    Some(nick) => {
+                        self.server.cast(ChatServerMsg::Msg(nick, line))?;
                         Ok(())
                     }
                 }
+            }
+            ChatSessionMsg::Join(nick) => state.send_line_nl(format!("join: {}", nick)),
+            ChatSessionMsg::Part(nick) => state.send_line_nl(format!("part: {}", nick)),
+            ChatSessionMsg::Msg(nick, msg) => {
+                if nick != state.nick.clone().unwrap_or_default() {
+                    state.send_line_nl(format!(
+                        "{}: {} (state nick={})",
+                        nick,
+                        msg,
+                        state.nick.clone().unwrap_or_default()
+                    ))?;
+                }
+
+                Ok(())
             }
         }
     }
@@ -205,7 +315,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     tracing::info!("Listening on port {}. Watchdog: {}", port, watchdog);
 
-    let (system_ref, _) = Actor::spawn(None, ChatServer {}, port).await?;
+    let (server, _) = Actor::spawn(None, ChatServer {}, ()).await?;
+    let (listener, _) = Actor::spawn(None, ChatListener {}, (server.clone(), port)).await?;
 
     tokio::signal::ctrl_c()
         .await
@@ -213,7 +324,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     tracing::info!("fin.");
 
-    system_ref.stop_and_wait(None, None).await?;
+    listener.stop_and_wait(None, None).await?;
+    server.stop_and_wait(None, None).await?;
 
     Ok(())
 }
