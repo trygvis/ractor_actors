@@ -266,12 +266,7 @@ impl Actor for ChatSession {
             ChatSessionMsg::Part(nick) => state.send_line_nl(format!("part: {}", nick)),
             ChatSessionMsg::Msg(nick, msg) => {
                 if nick != state.nick.clone().unwrap_or_default() {
-                    state.send_line_nl(format!(
-                        "{}: {} (state nick={})",
-                        nick,
-                        msg,
-                        state.nick.clone().unwrap_or_default()
-                    ))?;
+                    state.send_line_nl(format!("{}: {}", nick, msg,))?;
                 }
 
                 Ok(())
