@@ -2,8 +2,7 @@ use crate::net::tcp::session::{Packet, PacketReceiver};
 use bytes::{Buf, BytesMut};
 use ractor::{ActorProcessingErr, OutputPort};
 
-#[derive(Clone)]
-pub struct Frame(pub Vec<u8>);
+pub type Frame = Vec<u8>;
 
 pub struct FrameReader {
     receiver: OutputPort<Frame>,
@@ -61,7 +60,7 @@ impl PacketReceiver for FrameReader {
             let (more, frame) = self.process();
 
             if let Some(frame) = frame {
-                self.receiver.send(Frame(frame.to_vec()))
+                self.receiver.send(frame.to_vec())
             }
 
             if !more {

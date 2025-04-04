@@ -111,7 +111,7 @@ impl Actor for MySession {
 
         let port = OutputPort::default();
         port.subscribe(myself.clone(), |frame: Frame| {
-            Some(MySessionMsg::Frame(frame.0))
+            Some(MySessionMsg::Frame(frame))
         });
         let receiver = FrameReader::new(port);
 
