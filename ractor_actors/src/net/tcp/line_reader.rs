@@ -1,48 +1,133 @@
-use super::stream::ReaderHalf;
-// use crate::net::tcp::session::BytesAvailable;
-use ractor::{Actor, ActorProcessingErr, ActorRef, DerivedActorRef};
-use tokio::io::{AsyncBufReadExt, BufReader, Lines};
+use crate::net::tcp::session::{Packet, PacketReceiver};
+use ractor::{ActorProcessingErr, OutputPort};
 
 pub struct LineReader {
-    // pub session: DerivedActorRef<BytesAvailable>,
+    receiver: OutputPort<String>,
+    buf: Vec<u8>,
+    skip: bool,
 }
 
-// pub struct LineReaderState {
-//     reader: Lines<BufReader<ReaderHalf>>,
-// }
-
 impl LineReader {
-    // async fn pre_start(
-    //     &self,
-    //     myself: ActorRef<Self::Msg>,
-    //     reader: ReaderHalf,
-    // ) -> Result<Self::State, ActorProcessingErr> {
-    //     let _ = myself.cast(());
-    //
-    //     let reader = BufReader::new(reader);
-    //     let reader = reader.lines();
-    //
-    //     Ok(Self::State { reader })
-    // }
+    pub fn new(receiver: OutputPort<String>) -> Self {
+        Self {
+            receiver,
+            buf: Vec::default(),
+            skip: false,
+        }
+    }
 
-    // async fn handle(
-    //     &self,
-    //     myself: ActorRef<Self::Msg>,
-    //     _message: Self::Msg,
-    //     state: &mut Self::State,
-    // ) -> Result<(), ActorProcessingErr> {
-    //     match state.reader.next_line().await? {
-    //         Some(line) => {
-    //             self.session
-    //                 .cast(BytesAvailable(vec![line.as_bytes().into()]))?;
-    //
-    //             myself.cast(())?;
-    //         }
-    //         None => {
-    //             myself.stop(Some("channel_closed".to_string()));
-    //         }
-    //     }
-    //
-    //     Ok(())
-    // }
+    fn process(&mut self) -> (bool, Option<Vec<u8>>) {
+        // If we have consumed a \r, we skip the next byte if it is \n.
+        if self.skip {
+            let next = self.buf.get(0);
+            match next {
+                None => {
+                    // ... however, we need at least 1 byte to determine that.
+                    return (false, None);
+                }
+                Some(b'\n') => {
+                    // The next byte was a \n, so return the current data as a new line and keep on
+                    // processing
+                    self.buf.drain(0..1);
+                    // return (true, None);
+                }
+                Some(_) => (),
+            }
+        }
+
+        let pos = self.buf.iter().position(|&b| b == b'\r' || b == b'\n');
+
+        match pos {
+            None => (false, None),
+            Some(idx) => {
+                let next = self.buf.split_off(idx + 1);
+                let current = std::mem::replace(&mut self.buf, next);
+
+                let a = current.last();
+
+                // if the last byte is \r, set the skip flag and try again
+                if a.is_some_and(|&a| a == b'\r') {
+                    self.skip = true;
+                }
+
+                (true, Some(current[0..current.len() - 1].to_vec()))
+            }
+        }
+    }
+}
+
+#[cfg_attr(feature = "async-trait", ractor::async_trait)]
+impl PacketReceiver for LineReader {
+    async fn packet_ready(&mut self, packet: Packet) -> Result<(), ActorProcessingErr> {
+        self.buf.extend_from_slice(packet.as_slice());
+
+        loop {
+            let (more, line) = self.process();
+
+            if let Some(line) = line {
+                let string = String::from_utf8(line)?;
+
+                self.receiver.send(string);
+            }
+
+            if !more {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::net::tcp::line_reader::LineReader;
+    use ractor::OutputPort;
+
+    // #[ractor::concurrency::test]
+    #[test]
+    fn line_reader() {
+        check(vec![
+            ("abc", false, None), //
+            ("", false, None),
+        ]);
+
+        check(vec![
+            ("abc\nxyz\nbleh", true, Some("abc")),
+            ("", true, Some("xyz")),
+            ("", false, None),
+        ]);
+
+        check(vec![
+            ("a", false, None),
+            ("\n", true, Some("a")),
+            ("", false, None),
+        ]);
+
+        check(vec![
+            ("abc\r\n", true, Some("abc")), //
+            ("", false, None),              //
+        ]);
+
+        check(vec![
+            ("a", false, None),
+            ("\r", true, Some("a")),
+            ("\n", false, None),
+        ]);
+    }
+
+    fn check(io: Vec<(&str, bool, Option<&str>)>) {
+        let port = OutputPort::default();
+        let mut lr = LineReader::new(port);
+
+        let mut idx = 1;
+        for (input, more, res) in io {
+            lr.buf.extend(input.as_bytes());
+            let expected = (more, res.map(|s| s.as_bytes().to_vec()));
+            let actual = lr.process();
+            assert_eq!(expected, actual, "input #{}: {:0x?}", idx, input);
+
+            idx += 1;
+        }
+    }
 }

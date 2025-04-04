@@ -1,5 +1,4 @@
-use bytes::BytesMut;
-use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef, SupervisionEvent};
+use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent};
 use ractor_actors::net::tcp::line_reader::*;
 use ractor_actors::net::tcp::listener::*;
 use ractor_actors::net::tcp::session::*;
@@ -107,26 +106,17 @@ impl Actor for ChatListener {
         myself: ActorRef<Self::Msg>,
         (server, port): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
+        let acceptor = ChatSessionAcceptor { server };
+
         let _ = myself
             .spawn_linked(
                 Some(format!("listener-{}", port)),
-                Listener::new(port, IncomingEncryptionMode::Raw, move |stream| {
-                    let value = server.clone();
-                    async move {
-                        tracing::info!("New connection: {}", stream.peer_addr());
-                        Actor::spawn(
-                            Some(format!("ChatSession-{}", stream.peer_addr().port())),
-                            ChatSession {
-                                server: value.clone(),
-                            },
-                            stream,
-                        )
-                        .await
-                        .map_err(|e| ActorProcessingErr::from(e))?;
-                        Ok(())
-                    }
-                }),
-                (),
+                Listener::new(),
+                ListenerStartupArgs {
+                    port,
+                    encryption: IncomingEncryptionMode::Raw,
+                    acceptor,
+                },
             )
             .await?;
 
@@ -143,36 +133,40 @@ impl Actor for ChatListener {
     }
 }
 
+struct ChatSessionAcceptor {
+    server: ActorRef<ChatServerMsg>,
+}
+
+impl SessionAcceptor for ChatSessionAcceptor {
+    async fn new_session(&self, stream: NetworkStream) -> Result<(), ActorProcessingErr> {
+        tracing::info!("New connection: {}", stream.peer_addr());
+        Actor::spawn(
+            Some(format!("ChatSession-{}", stream.peer_addr().port())),
+            ChatSession {
+                server: self.server.clone(),
+            },
+            stream,
+        )
+        .await
+        .map_err(|e| ActorProcessingErr::from(e))?;
+        Ok(())
+    }
+}
+
 struct ChatSession {
     server: ActorRef<ChatServerMsg>,
 }
 
 #[derive(Clone)]
 enum ChatSessionMsg {
-    ReadLine(Vec<BytesMut>),
+    ReadLine(String),
     Join(String),
     Part(String),
     Msg(Nick, String),
 }
 
-impl From<BytesAvailable> for ChatSessionMsg {
-    fn from(BytesAvailable(frame): BytesAvailable) -> Self {
-        Self::ReadLine(frame)
-    }
-}
-
-impl TryFrom<ChatSessionMsg> for BytesAvailable {
-    type Error = ();
-
-    fn try_from(msg: ChatSessionMsg) -> Result<Self, Self::Error> {
-        match msg {
-            ChatSessionMsg::ReadLine(frame) => Ok(BytesAvailable(frame)),
-            _ => Err(()),
-        }
-    }
-}
 struct ChatSessionState {
-    session: ActorRef<SessionMessage>,
+    session: ActorRef<TcpSessionMessage>,
     nick: Option<String>,
 }
 
@@ -180,7 +174,7 @@ struct ChatSessionState {
 impl ChatSessionState {
     fn send_str(&mut self, string: &str) -> Result<(), ActorProcessingErr> {
         self.session
-            .cast(SessionMessage::Send(string.into()))
+            .cast(TcpSessionMessage::Send(string.into()))
             .map_err(ActorProcessingErr::from)
     }
 
@@ -191,7 +185,7 @@ impl ChatSessionState {
 
     fn send_line(&mut self, string: String) -> Result<(), ActorProcessingErr> {
         self.session
-            .cast(SessionMessage::Send(string.as_bytes().into()))
+            .cast(TcpSessionMessage::Send(string.as_bytes().into()))
             .map_err(ActorProcessingErr::from)
     }
 
@@ -202,7 +196,7 @@ impl ChatSessionState {
 
     fn send_nl(&mut self) -> Result<(), ActorProcessingErr> {
         self.session
-            .cast(SessionMessage::Send("\r\n".into()))
+            .cast(TcpSessionMessage::Send("\r\n".into()))
             .map_err(ActorProcessingErr::from)
     }
 }
@@ -217,14 +211,13 @@ impl Actor for ChatSession {
         myself: ActorRef<Self::Msg>,
         stream: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        let session = Session::spawn_linked(
-            myself.get_derived(),
-            stream,
-            myself.get_cell(),
-            Box::new(|session| Box::pin(async { Ok(LineReader { session }) })),
-        )
-        .await
-        .map_err(ActorProcessingErr::from)?;
+        let port = OutputPort::default();
+        port.subscribe(myself.clone(), |line| Some(ChatSessionMsg::ReadLine(line)));
+        let receiver = LineReader::new(port);
+
+        let session = TcpSession::spawn_linked(receiver, stream, myself.get_cell())
+            .await
+            .map_err(ActorProcessingErr::from)?;
 
         let mut state = ChatSessionState {
             session,
@@ -243,25 +236,19 @@ impl Actor for ChatSession {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            ChatSessionMsg::ReadLine(frame) => {
-                // It would be nice to create the string directly from the frame.
-                let bs: Vec<u8> = frame.iter().flat_map(|b| b.iter()).copied().collect();
-                let line = String::from_utf8(bs)?;
-
-                match state.nick.clone() {
-                    None => {
-                        state.send_line_nl(format!("Welcome {}!", &line))?;
-                        self.server
-                            .cast(ChatServerMsg::Join(line.clone(), myself))?;
-                        state.nick = Some(line);
-                        Ok(())
-                    }
-                    Some(nick) => {
-                        self.server.cast(ChatServerMsg::Msg(nick, line))?;
-                        Ok(())
-                    }
+            ChatSessionMsg::ReadLine(line) => match state.nick.clone() {
+                None => {
+                    state.send_line_nl(format!("Welcome {}!", &line))?;
+                    self.server
+                        .cast(ChatServerMsg::Join(line.clone(), myself))?;
+                    state.nick = Some(line);
+                    Ok(())
                 }
-            }
+                Some(nick) => {
+                    self.server.cast(ChatServerMsg::Msg(nick, line))?;
+                    Ok(())
+                }
+            },
             ChatSessionMsg::Join(nick) => state.send_line_nl(format!("join: {}", nick)),
             ChatSessionMsg::Part(nick) => state.send_line_nl(format!("part: {}", nick)),
             ChatSessionMsg::Msg(nick, msg) => {
