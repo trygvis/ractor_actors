@@ -3,11 +3,10 @@
 // This source code is licensed under both the MIT license found in the
 // LICENSE-MIT file in the root directory of this source tree.
 
-//! TCP server and session actor
+//! TCP listener, session actors and byte reading utilities.
 
 pub mod frame_reader;
 pub mod line_reader;
 pub mod listener;
-pub mod separator_reader;
 pub mod session;
 pub mod stream;

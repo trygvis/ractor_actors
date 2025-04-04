@@ -13,7 +13,7 @@ use ractor_actors::net::tcp::stream::*;
 use ractor_actors::watchdog;
 use ractor_actors::watchdog::TimeoutStrategy;
 use std::error::Error;
-use std::ops::{BitXor, BitXorAssign};
+use std::ops::BitXorAssign;
 use std::str::FromStr;
 
 struct MyServer;
@@ -24,6 +24,12 @@ struct MyServerArgs {
 
     /// The port to listen on
     port: NetworkPort,
+}
+
+impl Default for MyServer {
+    fn default() -> Self {
+        Self {}
+    }
 }
 
 #[cfg_attr(feature = "async-trait", async_trait::async_trait)]
@@ -123,7 +129,7 @@ impl Actor for MySession {
                 ractor::concurrency::Duration::from_secs(3),
                 TimeoutStrategy::Stop,
             )
-                .await?;
+            .await?;
         }
 
         Ok(Self::State {
@@ -154,15 +160,6 @@ impl Actor for MySession {
         }
 
         match message {
-            // Self::Msg::RawPacket(packet) => {
-            //     tracing::info!("Got packet: {:?}", packet);
-            //
-            //     let reply: Vec<u8> = packet.iter().map(|x| x.bitxor(0xff)).collect();
-            //
-            //     let _ = state.session.cast(TcpSessionMessage::Send(reply))?;
-            //
-            //     Ok(())
-            // }
             Self::Msg::Frame(mut frame) => {
                 tracing::info!("Got frame of size {}: {:?}", frame.len(), frame);
 
@@ -211,12 +208,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let s = std::env::var("PORT").unwrap_or("9999".to_string());
     let port = NetworkPort::from_str(&s)?;
 
+    // Set the WATCHDOG environment variable to enable the watchdog feature
     let watchdog = std::env::var("WATCHDOG").unwrap_or("0".to_string()) == "1";
 
-    tracing::info!("Listening on port {}. Watchdog: {}", port, watchdog);
-    tracing::info!("watchdog: {}", watchdog);
+    tracing::info!("Port     {}", port);
+    tracing::info!("watchdog {}", watchdog);
 
-    let (system_ref, _) = Actor::spawn(None, MyServer {}, MyServerArgs { watchdog, port }).await?;
+    let (system_ref, _) = ractor::spawn::<MyServer>(MyServerArgs { watchdog, port }).await?;
 
     tokio::signal::ctrl_c()
         .await

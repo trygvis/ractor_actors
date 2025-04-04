@@ -1,5 +1,16 @@
+// Copyright (c) Sean Lawlor
+//
+// This source code is licensed under both the MIT license found in the
+// LICENSE-MIT file in the root directory of this source tree.
+
+//! A [PacketReceiver] that converts the input stream into String lines. Each line is either `\n` or
+//! `\r\n` separated.
+
 use crate::net::tcp::session::{Packet, PacketReceiver};
 use ractor::{ActorProcessingErr, OutputPort};
+
+// TODO: The buffer could probably benefit from cleaner code and less byte copying by using BytesMut
+// as a buffer instead of Vec<u8>.
 
 pub struct LineReader {
     receiver: OutputPort<String>,
