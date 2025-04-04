@@ -4,6 +4,7 @@ use tokio::{
     net::TcpStream,
     sync::mpsc,
 };
+use std::ops::BitXorAssign;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -48,6 +49,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 eprintln!("Failed to read message.");
                 break;
             }
+
+            buffer.iter_mut().for_each(|b| b.bitxor_assign(0xff));
 
             if let Ok(message) = String::from_utf8(buffer) {
                 println!("Received: {}", message);

@@ -13,7 +13,7 @@ use ractor_actors::net::tcp::stream::*;
 use ractor_actors::watchdog;
 use ractor_actors::watchdog::TimeoutStrategy;
 use std::error::Error;
-use std::ops::BitXor;
+use std::ops::{BitXor, BitXorAssign};
 use std::str::FromStr;
 
 struct MyServer;
@@ -123,7 +123,7 @@ impl Actor for MySession {
                 ractor::concurrency::Duration::from_secs(3),
                 TimeoutStrategy::Stop,
             )
-            .await?;
+                .await?;
         }
 
         Ok(Self::State {
@@ -163,16 +163,16 @@ impl Actor for MySession {
             //
             //     Ok(())
             // }
-            Self::Msg::Frame(frame) => {
+            Self::Msg::Frame(mut frame) => {
                 tracing::info!("Got frame of size {}: {:?}", frame.len(), frame);
 
                 let header = (frame.len() as u64).to_be_bytes().to_vec();
 
+                // Invert all the bits and reply with the same message.
+                frame.iter_mut().for_each(|b| b.bitxor_assign(0xff));
+
                 let _ = state.session.cast(TcpSessionMessage::Send(header))?;
-
-                let body: Vec<u8> = frame.iter().map(|x| x.bitxor(0xff)).collect();
-
-                let _ = state.session.cast(TcpSessionMessage::Send(body))?;
+                let _ = state.session.cast(TcpSessionMessage::Send(frame))?;
 
                 Ok(())
             }
