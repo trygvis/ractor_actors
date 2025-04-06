@@ -30,7 +30,7 @@ impl LineReader {
     fn process(&mut self) -> (bool, Option<Vec<u8>>) {
         // If we have consumed a \r, we skip the next byte if it is \n.
         if self.skip {
-            let next = self.buf.get(0);
+            let next = self.buf.first();
             match next {
                 None => {
                     // ... however, we need at least 1 byte to determine that.
