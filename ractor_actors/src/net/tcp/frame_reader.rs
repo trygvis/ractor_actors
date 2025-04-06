@@ -58,10 +58,7 @@ impl FrameReader {
 
 #[cfg_attr(feature = "async-trait", ractor::async_trait)]
 impl PacketReceiver for FrameReader {
-    async fn packet_ready(
-        &mut self,
-        packet: Packet,
-    ) -> Result<(), ActorProcessingErr> {
+    async fn packet_ready(&mut self, packet: Packet) -> Result<(), ActorProcessingErr> {
         self.buf.extend(packet);
 
         loop {

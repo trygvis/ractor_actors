@@ -1,10 +1,10 @@
 use std::error::Error;
+use std::ops::BitXorAssign;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::TcpStream,
     sync::mpsc,
 };
-use std::ops::BitXorAssign;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
