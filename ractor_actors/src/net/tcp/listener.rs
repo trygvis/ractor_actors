@@ -161,8 +161,10 @@ where
                     };
 
                     if let Some(stream) = stream {
-                        state.acceptor.new_session(stream).await?;
-                        tracing::info!("TCP Session opened for {}", addr);
+                        match state.acceptor.new_session(stream).await {
+                            Ok(()) => tracing::info!("{}: session accepted", addr),
+                            Err(err) => tracing::info!("{}: session not accepted: {}", addr, err),
+                        }
                     }
                 }
                 Err(socket_accept_error) => {
