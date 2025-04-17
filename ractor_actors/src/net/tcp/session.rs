@@ -139,15 +139,17 @@ where
         // spawn writer + reader child actors
         let (writer, _) =
             Actor::spawn_linked(None, SessionWriter, write, myself.get_cell()).await?;
-        let (reader, _) = Actor::spawn_linked(
+
+        let (reader, _) = Actor::spawn(
             None,
             SessionReader {
                 session: myself.clone(),
             },
             read,
-            myself.get_cell(),
         )
         .await?;
+
+        reader.link(myself.get_cell());
 
         Ok(Self::State {
             writer,

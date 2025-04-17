@@ -5,6 +5,7 @@
 
 //! TCP server and session actor
 
+pub mod frame_reader;
 pub mod listener;
 pub mod session;
 pub mod stream;
