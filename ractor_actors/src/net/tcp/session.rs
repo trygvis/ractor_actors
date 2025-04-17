@@ -16,39 +16,39 @@ use std::marker::Send;
 use tokio::io::ErrorKind;
 use TcpSessionMessage::*;
 
-/// A frame of data
-pub type Frame = Vec<u8>;
+/// A packet of data
+pub type Packet = Vec<u8>;
 
-/// Represents a receiver of frames of data
+/// Represents a receiver of packets of data
 #[cfg_attr(feature = "async-trait", ractor::async_trait)]
-pub trait FrameReceiver: ractor::State {
-    /// Called when a frame is received by the [TcpSession] actor
+pub trait PacketReceiver: ractor::State {
+    /// Called when a packet is received by the [TcpSession] actor
     #[cfg(not(feature = "async-trait"))]
-    fn frame_ready(
-        &self,
-        f: Frame,
+    fn packet_ready(
+        &mut self,
+        f: Packet,
     ) -> impl std::future::Future<Output = Result<(), ActorProcessingErr>> + Send;
 
-    /// Called when a frame is received by the [TcpSession] actor
+    /// Called when a packet is received by the [TcpSession] actor
     #[cfg(feature = "async-trait")]
-    async fn frame_ready(&self, f: Frame) -> Result<(), ActorProcessingErr>;
+    async fn packet_ready(&mut self, f: Packet) -> Result<(), ActorProcessingErr>;
 }
 
 /// Supported messages by the [TcpSession] actor
 pub enum TcpSessionMessage {
-    /// Send a frame over the wire
-    Send(Frame),
-    /// Received a frame from the `SessionReader` child
-    FrameReady(Frame),
+    /// Send a packet over the wire
+    Send(Packet),
+    /// Received a packet from the `SessionReader` child
+    PacketReady(Packet),
 }
 
 /// State of a [TcpSession] actor
 pub struct TcpSessionState<R>
 where
-    R: FrameReceiver,
+    R: PacketReceiver,
 {
     writer: ActorRef<SessionWriterMessage>,
-    reader: ActorRef<SessionReaderMessage>,
+    reader: ActorRef<()>,
     receiver: R,
     stream_info: NetworkStreamInfo,
 }
@@ -56,7 +56,7 @@ where
 /// Startup arguments to starting a tcp session
 pub struct TcpSessionStartupArguments<R>
 where
-    R: FrameReceiver,
+    R: PacketReceiver,
 {
     /// The callback implementation for received for messages
     pub receiver: R,
@@ -67,14 +67,14 @@ where
 /// A tcp-session management actor
 pub struct TcpSession<R>
 where
-    R: FrameReceiver,
+    R: PacketReceiver,
 {
     _r: PhantomData<fn() -> R>,
 }
 
 impl<R> Default for TcpSession<R>
 where
-    R: FrameReceiver,
+    R: PacketReceiver,
 {
     fn default() -> Self {
         Self::new()
@@ -83,7 +83,7 @@ where
 
 impl<R> TcpSession<R>
 where
-    R: FrameReceiver,
+    R: PacketReceiver,
 {
     /// Create a new TcpSession actor instance
     pub fn new() -> Self {
@@ -121,7 +121,7 @@ where
 #[cfg_attr(feature = "async-trait", async_trait::async_trait)]
 impl<R> Actor for TcpSession<R>
 where
-    R: FrameReceiver,
+    R: PacketReceiver,
 {
     type Msg = TcpSessionMessage;
     type State = TcpSessionState<R>;
@@ -184,13 +184,13 @@ where
                 );
                 let _ = state.writer.cast(SessionWriterMessage::Write(msg));
             }
-            FrameReady(msg) => {
+            PacketReady(msg) => {
                 tracing::trace!(
                     "RECEIVE {} <- {} - '{msg:?}'",
                     state.stream_info.local_addr,
                     state.stream_info.peer_addr,
                 );
-                state.receiver.frame_ready(msg).await?;
+                state.receiver.packet_ready(msg).await?;
             }
         }
         Ok(())
@@ -310,15 +310,6 @@ impl Actor for SessionWriter {
 
 struct SessionReader;
 
-/// The node connection messages
-pub enum SessionReaderMessage {
-    /// Wait for an object from the stream
-    WaitForFrame,
-
-    /// Read next object off the stream
-    ReadFrame(u64),
-}
-
 struct SessionReaderState {
     reader: Option<ReaderHalf>,
     session: ActorRef<TcpSessionMessage>,
@@ -331,7 +322,7 @@ struct SessionReaderArgs {
 
 #[cfg_attr(feature = "async-trait", async_trait::async_trait)]
 impl Actor for SessionReader {
-    type Msg = SessionReaderMessage;
+    type Msg = ();
     type State = SessionReaderState;
     type Arguments = SessionReaderArgs;
 
@@ -341,7 +332,7 @@ impl Actor for SessionReader {
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         // start waiting for the first object on the network
-        let _ = myself.cast(SessionReaderMessage::WaitForFrame);
+        let _ = myself.cast(());
         Ok(Self::State {
             reader: Some(args.reader),
             session: args.session,
@@ -379,7 +370,7 @@ impl Actor for SessionReader {
                     }
                     Ok(sz) => state
                         .session
-                        .cast(FrameReady(buf[0..sz].to_vec()))
+                        .cast(PacketReady(buf[0..sz].to_vec()))
                         .map_err(ActorProcessingErr::from)?,
                 }
             }

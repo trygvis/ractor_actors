@@ -5,18 +5,16 @@
 
 extern crate ractor_actors;
 
-use chrono::{DateTime, Utc};
-use ractor::{Actor, ActorId, ActorProcessingErr, ActorRef};
-use ractor_actors::net::tcp::frame_reader::FrameReader;
+use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort};
+use ractor_actors::net::tcp::frame_reader::{Frame, FrameReader};
 use ractor_actors::net::tcp::listener::*;
 use ractor_actors::net::tcp::session::*;
 use ractor_actors::net::tcp::stream::*;
 use ractor_actors::watchdog;
 use ractor_actors::watchdog::TimeoutStrategy;
 use std::error::Error;
-use std::ops::Deref;
+use std::ops::BitXor;
 use std::str::FromStr;
-use std::time::SystemTime;
 
 struct MyServer;
 
@@ -82,7 +80,7 @@ impl SessionAcceptor for MyServerSocketAcceptor {
 struct MySession;
 
 enum MySessionMsg {
-    FrameReady(Frame),
+    Frame(Vec<u8>),
 }
 
 struct MySessionState {
@@ -94,19 +92,6 @@ struct MySessionState {
 struct MySessionArgs {
     watchdog: bool,
     stream: NetworkStream,
-}
-
-struct MyFrameReceiver {
-    session: ActorRef<MySessionMsg>,
-}
-
-#[cfg_attr(feature = "async-trait", async_trait::async_trait)]
-impl FrameReceiver for MyFrameReceiver {
-    async fn frame_ready(&self, frame: Frame) -> Result<(), ActorProcessingErr> {
-        self.session.cast(MySessionMsg::FrameReady(frame))?;
-
-        Ok(())
-    }
 }
 
 #[cfg_attr(feature = "async-trait", async_trait::async_trait)]
@@ -124,9 +109,11 @@ impl Actor for MySession {
 
         tracing::info!("New session: {}", stream.peer_addr());
 
-        let receiver = MyFrameReceiver {
-            session: myself.clone(),
-        };
+        let port = OutputPort::default();
+        port.subscribe(myself.clone(), |frame: Frame| {
+            Some(MySessionMsg::Frame(frame.0))
+        });
+        let receiver = FrameReader::new(port);
 
         let session = TcpSession::spawn_linked(receiver, stream, myself.get_cell()).await?;
 
@@ -162,21 +149,30 @@ impl Actor for MySession {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        if state.watchdog {
+            watchdog::ping(state.session.get_id()).await?;
+        }
+
         match message {
-            Self::Msg::FrameReady(frame) => {
-                if state.watchdog {
-                    watchdog::ping(state.session.get_id()).await?;
-                }
+            // Self::Msg::RawPacket(packet) => {
+            //     tracing::info!("Got packet: {:?}", packet);
+            //
+            //     let reply: Vec<u8> = packet.iter().map(|x| x.bitxor(0xff)).collect();
+            //
+            //     let _ = state.session.cast(TcpSessionMessage::Send(reply))?;
+            //
+            //     Ok(())
+            // }
+            Self::Msg::Frame(frame) => {
+                tracing::info!("Got frame of size {}: {:?}", frame.len(), frame);
 
-                let s: String = String::from_utf8(frame).unwrap();
-                tracing::info!("Got message: {:?}", s);
+                let header = (frame.len() as u64).to_be_bytes().to_vec();
 
-                let ts: DateTime<Utc> = SystemTime::now().into();
-                let reply = format!("{}: {}", ts.to_rfc3339(), s);
+                let _ = state.session.cast(TcpSessionMessage::Send(header))?;
 
-                let _ = state
-                    .session
-                    .cast(TcpSessionMessage::Send(reply.into_bytes()))?;
+                let body: Vec<u8> = frame.iter().map(|x| x.bitxor(0xff)).collect();
+
+                let _ = state.session.cast(TcpSessionMessage::Send(body))?;
 
                 Ok(())
             }
