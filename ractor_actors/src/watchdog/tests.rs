@@ -1,8 +1,9 @@
 use crate::watchdog::{
     r#impl::Watchdog,
-    TimeoutStrategy, WatchdogMsg,
+    WatchdogMsg,
     WatchdogMsg::{Register, Stats},
     WatchdogStats,
+    {TimeoutStrategy, TimeoutStrategy::*},
 };
 use ractor::*;
 use std::sync::atomic::AtomicBool;
@@ -48,42 +49,34 @@ async fn test_stats() {
 
     // Reset the stats
     watchdog::reset_stats().await.unwrap();
-    assert_eq!(get_stats().await, stats(0, 0, 0, 0));
+    assert_eq!(get_stats().await, new_stats(0, 0, 0, 0));
 
     // Create and register an actor
     let (actor, _) = spawn::<MyActor>(()).await.unwrap();
 
-    watchdog::register(
-        actor.get_cell(),
-        Duration::from_millis(100),
-        TimeoutStrategy::Stop,
-    )
+    watchdog::register(actor.get_cell(), Duration::from_millis(100), Stop)
         .await
         .unwrap();
 
     // Ok, this is mainly to get closer to 100% on the test coverage in mod.rs
     watchdog::ping(actor.get_id()).await.unwrap();
 
-    assert_eq!(get_stats().await, stats(1, 1, 0, 0));
+    assert_eq!(get_stats().await, new_stats(1, 1, 0, 0));
 
     // Unregister the actor
     watchdog::unregister(actor.get_cell()).await.unwrap();
 
-    assert_eq!(get_stats().await, stats(1, 0, 0, 0));
+    assert_eq!(get_stats().await, new_stats(1, 0, 0, 0));
 
     // Register it again
-    watchdog::register(
-        actor.get_cell(),
-        Duration::from_millis(100),
-        TimeoutStrategy::Stop,
-    )
+    watchdog::register(actor.get_cell(), Duration::from_millis(100), Stop)
         .await
         .unwrap();
 
     // Wait for it to be stopped
     sleep(Duration::from_millis(150)).await;
 
-    assert_eq!(get_stats().await, stats(2, 0, 0, 1));
+    assert_eq!(get_stats().await, new_stats(2, 0, 0, 1));
 
     let _ = actor.stop_and_wait(None, None).await;
 
@@ -91,29 +84,46 @@ async fn test_stats() {
 
     let (actor, _) = spawn::<MyActor>(()).await.unwrap();
 
-    watchdog::register(
-        actor.get_cell(),
-        Duration::from_millis(100),
-        TimeoutStrategy::Kill,
-    )
+    watchdog::register(actor.get_cell(), Duration::from_millis(100), Kill)
         .await
         .unwrap();
 
     // Wait for it to be killed
     sleep(Duration::from_millis(150)).await;
 
-    assert_eq!(get_stats().await, stats(3, 0, 1, 1));
+    assert_eq!(get_stats().await, new_stats(3, 0, 1, 1));
 
     let _ = actor.stop_and_wait(None, None).await;
 }
 
-fn stats(registered: usize, active: usize, kills: usize, stops: usize) -> WatchdogStats {
+fn new_stats(registered: usize, active: usize, kills: usize, stops: usize) -> WatchdogStats {
     WatchdogStats {
         registered,
         active,
         kills,
         stops,
     }
+}
+
+async fn register<T>(
+    watchdog: &ActorRef<WatchdogMsg>,
+    subject: &ActorRef<T>,
+    duration_ms: u64,
+    timeout_strategy: TimeoutStrategy,
+) -> () {
+    let duration = Duration::from_millis(duration_ms);
+    watchdog
+        .cast(Register(subject.get_cell(), duration, timeout_strategy))
+        .map_err(ActorProcessingErr::from)
+        .unwrap()
+}
+
+async fn stats(watchdog: &ActorRef<WatchdogMsg>) -> WatchdogStats {
+    watchdog
+        .call(|port| Stats(port), None)
+        .await
+        .unwrap()
+        .unwrap()
 }
 
 #[concurrency::test]
@@ -134,14 +144,7 @@ async fn test_actor() {
             myself: ActorRef<Self::Msg>,
             watchdog: Self::Arguments,
         ) -> Result<Self::State, ActorProcessingErr> {
-            cast!(
-                watchdog.clone(),
-                Register(
-                    myself.get_cell(),
-                    Duration::from_millis(500),
-                    TimeoutStrategy::Kill
-                )
-            )?;
+            register(&watchdog, &myself, 500, Kill).await;
 
             myself.send_after(Duration::from_millis(400), || "hello".to_string());
 
@@ -152,19 +155,13 @@ async fn test_actor() {
             &self,
             myself: ActorRef<Self::Msg>,
             msg: Self::Msg,
-            state: &mut Self::State,
+            watchdog: &mut Self::State,
         ) -> Result<(), ActorProcessingErr> {
             info!("handle() msg={}", msg);
             HANDLE.store(true, SeqCst);
-            cast!(
-                state,
-                Register(
-                    myself.get_cell(),
-                    Duration::from_millis(500),
-                    TimeoutStrategy::Kill
-                )
-            )
-            .map_err(|e| ActorProcessingErr::from(e))
+            register(watchdog, &myself, 500, Kill).await;
+
+            Ok(())
         }
     }
 
@@ -186,11 +183,7 @@ async fn test_actor() {
     assert_eq!(true, HANDLE.load(SeqCst));
     assert_eq!(false, POST_STOP.load(SeqCst));
     assert_eq!(ActorStatus::Stopped, my_actor.get_status());
-    let stats = watchdog
-        .call(|port| Stats(port), None)
-        .await
-        .unwrap()
-        .unwrap();
+    let stats = stats(&watchdog).await;
     assert_eq!(1, stats.kills);
 
     my_actor_handle.await.unwrap();
