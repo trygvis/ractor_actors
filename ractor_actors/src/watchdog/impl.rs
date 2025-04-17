@@ -15,10 +15,13 @@ pub enum WatchdogMsg {
     Ping(ActorId, RpcReplyPort<()>),
     Timeout(ActorId),
     Stats(RpcReplyPort<WatchdogStats>),
+    #[cfg(test)]
+    ResetStats,
 }
 
 pub struct WatchdogState {
     subjects: HashMap<ActorId, Registration>,
+    registered: usize,
     kills: usize,
     stops: usize,
 }
@@ -43,9 +46,18 @@ impl Actor for Watchdog {
     ) -> Result<Self::State, ActorProcessingErr> {
         Ok(WatchdogState {
             subjects: HashMap::new(),
+            registered: 0,
             kills: 0,
             stops: 0,
         })
+    }
+
+    async fn post_stop(
+        &self,
+        _: ActorRef<Self::Msg>,
+        _: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        Ok(())
     }
 
     async fn handle(
@@ -60,7 +72,7 @@ impl Actor for Watchdog {
 
                 let timer = myself.send_after(timeout, move || WatchdogMsg::Timeout(id));
 
-                state.subjects.insert(
+                let old = state.subjects.insert(
                     id,
                     Registration {
                         actor,
@@ -69,6 +81,11 @@ impl Actor for Watchdog {
                         timer,
                     },
                 );
+                if old.is_none() {
+                    // Don't count double registrations
+                    state.registered += 1;
+                }
+
                 Ok(())
             }
             WatchdogMsg::Unregister(actor) => {
@@ -121,9 +138,24 @@ impl Actor for Watchdog {
                 };
                 Ok(())
             }
-            WatchdogMsg::Stats(reply) => reply
-                .send(WatchdogStats { kills: state.kills })
-                .map_err(ActorProcessingErr::from),
+            WatchdogMsg::Stats(reply) => {
+                // Ignore any errors, don't want to shut down ourselves because of it.
+                let _ = reply.send(WatchdogStats {
+                    registered: state.registered,
+                    active: state.subjects.len(),
+                    kills: state.kills,
+                    stops: state.stops,
+                });
+
+                Ok(())
+            }
+            #[cfg(test)]
+            WatchdogMsg::ResetStats => {
+                state.registered = 0;
+                state.kills = 0;
+                state.stops = 0;
+                Ok(())
+            }
         }
     }
 

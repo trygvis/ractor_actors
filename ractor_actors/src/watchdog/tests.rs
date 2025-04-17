@@ -1,15 +1,123 @@
-use super::WatchdogMsg::{Register, Stats};
-use super::{TimeoutStrategy, WatchdogMsg};
-use crate::watchdog::r#impl::Watchdog;
+use crate::watchdog::{
+    r#impl::Watchdog,
+    TimeoutStrategy, WatchdogMsg,
+    WatchdogMsg::{Register, Stats},
+    WatchdogStats,
+};
 use ractor::*;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::SeqCst;
 use std::time::Duration;
+use tokio::time::sleep;
 use tracing::info;
 
+// Testing the Watchdog actor is a bit complicated since it uses a global instance. Thus, these
+// tests should instantiate the implementation directly so they all run in isolation.
+
+// This test however is special and uses the public interface. It can be the only one that does
+// this, because the stats would be messed up by any other test running concurrently.
 #[concurrency::test]
-#[tracing_test::traced_test]
-async fn test_foo() {
+async fn test_stats() {
+    use crate::watchdog;
+
+    async fn get_stats() -> WatchdogStats {
+        watchdog::stats().await.unwrap()
+    }
+
+    struct MyActor;
+    impl Default for MyActor {
+        fn default() -> Self {
+            Self {}
+        }
+    }
+
+    #[cfg_attr(feature = "async-trait", ractor::async_trait)]
+    impl Actor for MyActor {
+        type Msg = ();
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _: ActorRef<Self::Msg>,
+            _: Self::Arguments,
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+    }
+
+    // Reset the stats
+    watchdog::reset_stats().await.unwrap();
+    assert_eq!(get_stats().await, stats(0, 0, 0, 0));
+
+    // Create and register an actor
+    let (actor, _) = spawn::<MyActor>(()).await.unwrap();
+
+    watchdog::register(
+        actor.get_cell(),
+        Duration::from_millis(100),
+        TimeoutStrategy::Stop,
+    )
+        .await
+        .unwrap();
+
+    // Ok, this is mainly to get closer to 100% on the test coverage in mod.rs
+    watchdog::ping(actor.get_id()).await.unwrap();
+
+    assert_eq!(get_stats().await, stats(1, 1, 0, 0));
+
+    // Unregister the actor
+    watchdog::unregister(actor.get_cell()).await.unwrap();
+
+    assert_eq!(get_stats().await, stats(1, 0, 0, 0));
+
+    // Register it again
+    watchdog::register(
+        actor.get_cell(),
+        Duration::from_millis(100),
+        TimeoutStrategy::Stop,
+    )
+        .await
+        .unwrap();
+
+    // Wait for it to be stopped
+    sleep(Duration::from_millis(150)).await;
+
+    assert_eq!(get_stats().await, stats(2, 0, 0, 1));
+
+    let _ = actor.stop_and_wait(None, None).await;
+
+    // Try again with Kill strategy
+
+    let (actor, _) = spawn::<MyActor>(()).await.unwrap();
+
+    watchdog::register(
+        actor.get_cell(),
+        Duration::from_millis(100),
+        TimeoutStrategy::Kill,
+    )
+        .await
+        .unwrap();
+
+    // Wait for it to be killed
+    sleep(Duration::from_millis(150)).await;
+
+    assert_eq!(get_stats().await, stats(3, 0, 1, 1));
+
+    let _ = actor.stop_and_wait(None, None).await;
+}
+
+fn stats(registered: usize, active: usize, kills: usize, stops: usize) -> WatchdogStats {
+    WatchdogStats {
+        registered,
+        active,
+        kills,
+        stops,
+    }
+}
+
+#[concurrency::test]
+async fn test_actor() {
     static HANDLE: AtomicBool = AtomicBool::new(false);
     static POST_STOP: AtomicBool = AtomicBool::new(false);
 
@@ -40,15 +148,6 @@ async fn test_foo() {
             Ok(watchdog)
         }
 
-        async fn post_stop(
-            &self,
-            _: ActorRef<Self::Msg>,
-            _: &mut Self::State,
-        ) -> Result<(), ActorProcessingErr> {
-            POST_STOP.store(true, SeqCst);
-            Ok(())
-        }
-
         async fn handle(
             &self,
             myself: ActorRef<Self::Msg>,
@@ -77,12 +176,12 @@ async fn test_foo() {
     let (my_actor, my_actor_handle) = Actor::spawn(None, MyActor, watchdog.clone()).await.unwrap();
     info!("my_actor started");
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    sleep(Duration::from_millis(100)).await;
 
     assert_eq!(false, HANDLE.load(SeqCst));
     assert_eq!(ActorStatus::Running, my_actor.get_status());
 
-    tokio::time::sleep(Duration::from_millis(3000)).await;
+    sleep(Duration::from_millis(3000)).await;
 
     assert_eq!(true, HANDLE.load(SeqCst));
     assert_eq!(false, POST_STOP.load(SeqCst));

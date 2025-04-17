@@ -143,22 +143,33 @@ pub async fn ping(actor: ActorId) -> Result<(), MessagingErr<()>> {
 }
 
 /// The return value from [stats] that describes
+#[derive(Debug, Eq, PartialEq)]
 pub struct WatchdogStats {
+    pub registered: usize,
+    pub active: usize,
     pub kills: usize,
+    pub stops: usize,
 }
 
 pub async fn stats() -> Result<WatchdogStats, MessagingErr<()>> {
     call(WatchdogMsg::Stats).await
 }
 
-static WATCHDOG: OnceCell<Result<ActorRef<WatchdogMsg>, ActorProcessingErr>> =
-    OnceCell::const_new();
+#[cfg(test)]
+pub async fn reset_stats() -> Result<(), MessagingErr<()>> {
+    cast(WatchdogMsg::ResetStats).await
+}
+
+// Internal helpers
 
 async fn spawn() -> Result<ActorRef<WatchdogMsg>, ActorProcessingErr> {
     let (watchdog, _) = Actor::spawn(None, r#impl::Watchdog {}, ()).await?;
 
     Ok(watchdog)
 }
+
+static WATCHDOG: OnceCell<Result<ActorRef<WatchdogMsg>, ActorProcessingErr>> =
+    OnceCell::const_new();
 
 async fn cast(msg: WatchdogMsg) -> Result<(), MessagingErr<()>> {
     match WATCHDOG.get_or_init(spawn).await {
