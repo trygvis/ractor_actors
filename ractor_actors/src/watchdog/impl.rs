@@ -81,9 +81,15 @@ impl Actor for Watchdog {
                         timer,
                     },
                 );
-                if old.is_none() {
-                    // Don't count double registrations
-                    state.registered += 1;
+                match old {
+                    None => {
+                        // Don't count double registrations
+                        state.registered += 1;
+                    }
+                    Some(registration) => {
+                        // Stop the old timer
+                        // registration.timer.abort();
+                    }
                 }
 
                 Ok(())

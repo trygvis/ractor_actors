@@ -192,3 +192,50 @@ async fn test_actor() {
 
     watchdog_handle.await.unwrap();
 }
+
+#[concurrency::test]
+#[tracing_test::traced_test]
+async fn test_double_registration() {
+    struct MyActor;
+    impl Default for MyActor {
+        fn default() -> Self {
+            Self {}
+        }
+    }
+
+    #[cfg_attr(feature = "async-trait", ractor::async_trait)]
+    impl Actor for MyActor {
+        type Msg = ();
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _: ActorRef<Self::Msg>,
+            _: Self::Arguments,
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+    }
+
+    let (watchdog, watchdog_handle) = Actor::spawn(None, Watchdog, ()).await.unwrap();
+
+    let (actor, _) = spawn::<MyActor>(()).await.unwrap();
+
+    // Register the same actor twice, once with a short interval and one with longer
+    // Sleep somewhere in between the durations
+    // Check that the actor is alive, showing that long once did override the shorter one
+    register(&watchdog, &actor, 100, Stop).await;
+
+    register(&watchdog, &actor, 500, Stop).await;
+
+    sleep(Duration::from_millis(250)).await;
+
+    assert_eq!(actor.get_status(), ActorStatus::Running);
+
+    let _ = actor.stop_and_wait(None, None).await;
+
+    watchdog.stop(None);
+
+    watchdog_handle.await.unwrap();
+}
