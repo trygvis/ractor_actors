@@ -7,7 +7,9 @@ extern crate ractor_actors;
 
 use chrono::{DateTime, Utc};
 use ractor::{Actor, ActorProcessingErr, ActorRef};
-use ractor_actors::net::tcp::*;
+use ractor_actors::net::tcp::listener::*;
+use ractor_actors::net::tcp::session::*;
+use ractor_actors::net::tcp::stream::*;
 use ractor_actors::watchdog;
 use ractor_actors::watchdog::TimeoutStrategy;
 use std::error::Error;
@@ -125,16 +127,7 @@ impl Actor for MySession {
             session: myself.clone(),
         };
 
-        let (session, _) = TcpSession::spawn_linked(
-            None,
-            TcpSession::default(),
-            TcpSessionStartupArguments {
-                receiver,
-                tcp_session: stream,
-            },
-            myself.get_cell(),
-        )
-        .await?;
+        let session = TcpSession::spawn_linked(receiver, stream, myself.get_cell()).await?;
 
         if watchdog {
             watchdog::register(

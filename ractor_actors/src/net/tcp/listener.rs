@@ -7,11 +7,10 @@
 //!
 //! See [ListenerStartupArgs] for its startup arguments.
 
+use super::stream::{IncomingEncryptionMode, NetworkPort, NetworkStream};
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::marker::PhantomData;
 use tokio::net::TcpListener;
-
-use super::{IncomingEncryptionMode, NetworkStream};
 
 #[cfg_attr(feature = "async-trait", async_trait::async_trait)]
 pub trait SessionAcceptor: ractor::State {
@@ -74,7 +73,7 @@ where
     R: SessionAcceptor,
 {
     /// Port to listen on
-    pub port: super::NetworkPort,
+    pub port: NetworkPort,
     /// Encryption settings for incoming sockets
     pub encryption: IncomingEncryptionMode,
     /// Callback module for accepted sockets
