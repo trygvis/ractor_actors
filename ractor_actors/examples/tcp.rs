@@ -6,7 +6,7 @@
 extern crate ractor_actors;
 
 use chrono::{DateTime, Utc};
-use ractor::{Actor, ActorProcessingErr, ActorRef};
+use ractor::{Actor, ActorId, ActorProcessingErr, ActorRef};
 use ractor_actors::net::tcp::frame_reader::FrameReader;
 use ractor_actors::net::tcp::listener::*;
 use ractor_actors::net::tcp::session::*;
@@ -14,6 +14,7 @@ use ractor_actors::net::tcp::stream::*;
 use ractor_actors::watchdog;
 use ractor_actors::watchdog::TimeoutStrategy;
 use std::error::Error;
+use std::ops::Deref;
 use std::str::FromStr;
 use std::time::SystemTime;
 
@@ -66,9 +67,7 @@ impl SessionAcceptor for MyServerSocketAcceptor {
         tracing::info!("New connection: {}", stream.peer_addr());
         Actor::spawn(
             Some(format!("MySession-{}", stream.peer_addr().port())),
-            MySession {
-                info: stream.info(),
-            },
+            MySession {},
             MySessionArgs {
                 watchdog: self.watchdog,
                 stream,
@@ -80,9 +79,7 @@ impl SessionAcceptor for MyServerSocketAcceptor {
     }
 }
 
-struct MySession {
-    info: NetworkStreamInfo,
-}
+struct MySession;
 
 enum MySessionMsg {
     FrameReady(Frame),
@@ -91,6 +88,7 @@ enum MySessionMsg {
 struct MySessionState {
     watchdog: bool,
     session: ActorRef<TcpSessionMessage>,
+    info: NetworkStreamInfo,
 }
 
 struct MySessionArgs {
@@ -104,8 +102,8 @@ struct MyFrameReceiver {
 
 #[cfg_attr(feature = "async-trait", async_trait::async_trait)]
 impl FrameReceiver for MyFrameReceiver {
-    async fn frame_ready(&self, f: Frame) -> Result<(), ActorProcessingErr> {
-        self.session.cast(MySessionMsg::FrameReady(f))?;
+    async fn frame_ready(&self, frame: Frame) -> Result<(), ActorProcessingErr> {
+        self.session.cast(MySessionMsg::FrameReady(frame))?;
 
         Ok(())
     }
@@ -122,6 +120,8 @@ impl Actor for MySession {
         myself: ActorRef<Self::Msg>,
         Self::Arguments { watchdog, stream }: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
+        let info = stream.info();
+
         tracing::info!("New session: {}", stream.peer_addr());
 
         let receiver = MyFrameReceiver {
@@ -139,29 +139,33 @@ impl Actor for MySession {
             .await?;
         }
 
-        Ok(Self::State { watchdog, session })
+        Ok(Self::State {
+            watchdog,
+            session,
+            info,
+        })
     }
 
     async fn post_stop(
         &self,
         _: ActorRef<Self::Msg>,
-        _: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        tracing::info!("Stopping connection for {}", self.info.peer_addr);
+        tracing::info!("Stopping connection for {}", state.info.peer_addr);
 
         Ok(())
     }
 
     async fn handle(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
             Self::Msg::FrameReady(frame) => {
                 if state.watchdog {
-                    watchdog::ping(myself.get_id()).await?;
+                    watchdog::ping(state.session.get_id()).await?;
                 }
 
                 let s: String = String::from_utf8(frame).unwrap();

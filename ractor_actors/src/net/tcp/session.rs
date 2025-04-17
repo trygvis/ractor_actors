@@ -8,6 +8,7 @@
 // TODO: RUSTLS + Tokio : https://github.com/tokio-rs/tls/blob/master/tokio-rustls/examples/server/src/main.rs
 
 use super::stream::{NetworkStream, NetworkStreamInfo, ReaderHalf, WriterHalf};
+use bytes::BytesMut;
 use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef, SpawnErr, SupervisionEvent};
 use std::marker::PhantomData;
 #[cfg(not(feature = "async-trait"))]
@@ -97,7 +98,7 @@ where
         match Actor::spawn_linked(
             Some(stream.peer_addr().to_string()),
             TcpSession::new(),
-            TcpSessionStartupArguments{
+            TcpSessionStartupArguments {
                 receiver,
                 tcp_session: stream,
             },
@@ -131,7 +132,7 @@ where
         myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        let stream_info = args.tcp_session.info();
+        let info = args.tcp_session.info();
 
         let (read, write) = args.tcp_session.into_split();
 
@@ -140,22 +141,22 @@ where
         let (writer, _) =
             Actor::spawn_linked(None, SessionWriter, write, myself.get_cell()).await?;
 
-        let (reader, _) = Actor::spawn(
+        let (reader, _) = Actor::spawn_linked(
             None,
-            SessionReader {
+            SessionReader {},
+            SessionReaderArgs {
+                reader: read,
                 session: myself.clone(),
             },
-            read,
+            myself.get_cell(),
         )
         .await?;
 
-        reader.link(myself.get_cell());
-
         Ok(Self::State {
+            stream_info: info,
             writer,
             reader,
             receiver: args.receiver,
-            stream_info,
         })
     }
 
@@ -212,7 +213,10 @@ where
                 } else {
                     tracing::error!("TCP Session received a child panic from an unknown child actor ({}) - '{}'", actor.get_id(), panic_msg);
                 }
-                myself.stop_children(Some("session_stop_panic".to_string()));
+
+                myself
+                    .stop_children_and_wait(Some("session_stop_panic".to_string()), None)
+                    .await;
                 myself.stop(Some("child_panic".to_string()));
             }
             SupervisionEvent::ActorTerminated(actor, _, exit_reason) => {
@@ -223,8 +227,11 @@ where
                 } else {
                     tracing::warn!("TCP Session received a child exit from an unknown child actor ({}) - '{:?}'", actor.get_id(), exit_reason);
                 }
-                myself.stop_children(Some("session_stop_terminated".to_string()));
-                myself.stop(Some("child_terminate".to_string()));
+
+                myself
+                    .stop_children_and_wait(Some("session_stop_panic".to_string()), None)
+                    .await;
+                myself.stop(Some("child_panic".to_string()));
             }
             _ => {
                 // all ok
@@ -234,7 +241,7 @@ where
     }
 }
 
-// =========== Tcp stream types + helpers ============ //
+// =========== Tcp stream types ============ //
 
 struct SessionWriter;
 
@@ -244,7 +251,7 @@ struct SessionWriterState {
 
 enum SessionWriterMessage {
     /// Write an object over the wire
-    Write(Frame),
+    Write(Vec<u8>),
 }
 
 #[cfg_attr(feature = "async-trait", ractor::async_trait)]
@@ -284,22 +291,10 @@ impl Actor for SessionWriter {
         match message {
             SessionWriterMessage::Write(msg) if state.writer.is_some() => {
                 if let Some(stream) = &mut state.writer {
-                    if let WriterHalf::Regular(w) = stream {
-                        w.writable().await?;
-                    }
-
-                    if let Err(write_err) = stream.write_u64(msg.len() as u64).await {
+                    if let Err(write_err) = stream.write_all(&msg).await {
                         tracing::warn!("Error writing to the stream '{}'", write_err);
-                    } else {
-                        tracing::trace!("Wrote length, writing payload (len={})", msg.len());
-                        // now send the object
-                        if let Err(write_err) = stream.write_all(&msg).await {
-                            tracing::warn!("Error writing to the stream '{}'", write_err);
-                            myself.stop(Some("channel_closed".to_string()));
-                            return Ok(());
-                        }
-                        // flush the stream
-                        stream.flush().await?;
+                        myself.stop(Some("channel_closed".to_string()));
+                        return Ok(());
                     }
                 }
             }
@@ -313,11 +308,9 @@ impl Actor for SessionWriter {
 
 // =========== Tcp Session reader ============ //
 
-struct SessionReader {
-    session: ActorRef<TcpSessionMessage>,
-}
+struct SessionReader;
 
-/// The session connection messages
+/// The node connection messages
 pub enum SessionReaderMessage {
     /// Wait for an object from the stream
     WaitForFrame,
@@ -328,23 +321,30 @@ pub enum SessionReaderMessage {
 
 struct SessionReaderState {
     reader: Option<ReaderHalf>,
+    session: ActorRef<TcpSessionMessage>,
 }
 
-#[cfg_attr(feature = "async-trait", ractor::async_trait)]
+struct SessionReaderArgs {
+    reader: ReaderHalf,
+    session: ActorRef<TcpSessionMessage>,
+}
+
+#[cfg_attr(feature = "async-trait", async_trait::async_trait)]
 impl Actor for SessionReader {
     type Msg = SessionReaderMessage;
     type State = SessionReaderState;
-    type Arguments = ReaderHalf;
+    type Arguments = SessionReaderArgs;
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        reader: ReaderHalf,
+        args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         // start waiting for the first object on the network
         let _ = myself.cast(SessionReaderMessage::WaitForFrame);
         Ok(Self::State {
-            reader: Some(reader),
+            reader: Some(args.reader),
+            session: args.session,
         })
     }
 
@@ -361,64 +361,30 @@ impl Actor for SessionReader {
     async fn handle(
         &self,
         myself: ActorRef<Self::Msg>,
-        message: Self::Msg,
+        _: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        match message {
-            Self::Msg::WaitForFrame if state.reader.is_some() => {
-                if let Some(stream) = &mut state.reader {
-                    match stream.read_u64().await {
-                        Ok(length) => {
-                            tracing::trace!("Payload length message ({}) received", length);
-                            let _ = myself.cast(SessionReaderMessage::ReadFrame(length));
-                            return Ok(());
-                        }
-                        Err(err) if err.kind() == ErrorKind::UnexpectedEof => {
-                            tracing::trace!("Error (EOF) on stream");
-                            // EOF, close the stream by dropping the stream
-                            drop(state.reader.take());
-                            myself.stop(Some("channel_closed".to_string()));
-                        }
-                        Err(_other_err) => {
-                            tracing::trace!("Error ({:?}) on stream", _other_err);
-                            // some other TCP error, more handling necessary
-                        }
+        loop {
+            if let Some(ref mut reader) = &mut state.reader {
+                let mut buf: [u8; 8192] = [0; 8192];
+                let sz = reader.read(&mut buf).await;
+                match sz {
+                    Ok(0) => {
+                        myself.stop(Some("channel_closed".to_string()));
+                        break;
                     }
-                }
-
-                let _ = myself.cast(SessionReaderMessage::WaitForFrame);
-            }
-            Self::Msg::ReadFrame(length) if state.reader.is_some() => {
-                if let Some(stream) = &mut state.reader {
-                    match stream.read_n_bytes(length as usize).await {
-                        Ok(buf) => {
-                            tracing::trace!("Payload of length({}) received", buf.len());
-                            // NOTE: Our implementation writes 2 messages when sending something over the wire, the first
-                            // is exactly 8 bytes which constitute the length of the payload message (u64 in big endian format),
-                            // followed by the payload. This tells our TCP reader how much data to read off the wire
-
-                            self.session.cast(FrameReady(buf))?;
-                        }
-                        Err(err) if err.kind() == ErrorKind::UnexpectedEof => {
-                            // EOF, close the stream by dropping the stream
-                            drop(state.reader.take());
-                            myself.stop(Some("channel_closed".to_string()));
-                            return Ok(());
-                        }
-                        Err(_other_err) => {
-                            // TODO: some other TCP error, more handling necessary
-                        }
+                    Err(err) => {
+                        tracing::warn!("Error reading from reader: {}", err);
+                        break;
                     }
+                    Ok(sz) => state
+                        .session
+                        .cast(FrameReady(buf[0..sz].to_vec()))
+                        .map_err(ActorProcessingErr::from)?,
                 }
-
-                // we've read the object, now wait for next object
-                let _ = myself.cast(SessionReaderMessage::WaitForFrame);
-            }
-            _ => {
-                // no stream is available, keep looping until one is available
-                let _ = myself.cast(SessionReaderMessage::WaitForFrame);
             }
         }
+
         Ok(())
     }
 }

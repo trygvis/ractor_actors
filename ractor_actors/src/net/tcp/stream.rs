@@ -1,5 +1,7 @@
 use std::net::SocketAddr;
-use tokio::io::{AsyncReadExt, ReadHalf, WriteHalf};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf, ReadHalf, WriteHalf};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 
@@ -142,11 +144,25 @@ impl ReaderHalf {
         }
     }
 
-   pub async fn read<'a>(&'a mut self, buf: &'a mut [u8]) -> tokio::io::Result<usize> {
+    pub async fn read<'a>(&'a mut self, buf: &'a mut [u8]) -> tokio::io::Result<usize> {
         match self {
             Self::ServerTls(t) => t.read(buf).await,
             Self::ClientTls(t) => t.read(buf).await,
             Self::Regular(t) => t.read(buf).await,
+        }
+    }
+}
+
+impl AsyncRead for ReaderHalf {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::ServerTls(stream) => Pin::new(stream).poll_read(cx, buf),
+            Self::ClientTls(stream) => Pin::new(stream).poll_read(cx, buf),
+            Self::Regular(stream) => Pin::new(stream).poll_read(cx, buf),
         }
     }
 }
